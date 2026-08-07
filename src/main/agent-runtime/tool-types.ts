@@ -39,6 +39,12 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** 记录一条变更项（仅写工具使用；由 RunCoordinator 注入） */
   recordChange: (change: import('../../shared/types').ChangeItem) => void;
+  /**
+   * 当前 run 可见的附件范围（本会话上下文消息引用的附件 id，由 RunCoordinator 注入）。
+   * 缺省（undefined）= 不限制（工具直接执行，如单元测试）。
+   * 附件读取工具据此硬性过滤：范围外的附件默认不可见；跨会话读取须作者显式要求。
+   */
+  attachmentScope?: ReadonlySet<string>;
 }
 
 /** 工具规格 */

@@ -14,6 +14,7 @@ import { confirmDialog, promptDialog } from './ui/dialog';
 import { MarkdownEditor } from './ui/MarkdownEditor';
 import { MarkdownView } from './ui/MarkdownView';
 import type { NodeSummary, NodeVersion } from '../../shared/ipc-types';
+import { ASSET_TYPE_LABELS } from '../../shared/types';
 
 // ---------------------------------------------------------------------------
 // 节点版本历史（§5.5）
@@ -74,6 +75,7 @@ function VersionHistory({ node }: { node: NodeSummary }): React.ReactElement {
 
 function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
   const [draft, setDraft] = React.useState('');
+  const [savedDraft, setSavedDraft] = React.useState('');
   const [official, setOfficial] = React.useState('');
   const isScene = node.type === 'scene';
   const [tab, setTab] = React.useState<'draft' | 'official'>('draft');
@@ -83,9 +85,13 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
   React.useEffect(() => {
     void store.readNodeContent(node.id).then((c) => {
       setDraft(c.draft ?? '');
+      setSavedDraft(c.draft ?? '');
       setOfficial(c.official ?? '');
     });
   }, [node.id, node.hasDraft, node.hasOfficial]);
+
+  /** 草稿是否相对「已保存状态」有未保存修改（§用户反馈：保存后按钮变灰，改动后重新亮起）。 */
+  const draftChanged = draft !== savedDraft;
 
   /** 提交为正式版（§5.5）：先展示影响汇总，默认排除带「待定：」标记的节点。 */
   const commit = async (): Promise<void> => {
@@ -139,21 +145,12 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
     if (title && title !== node.title) void store.renameNode(node.id, title);
   };
 
-  /** 保存草稿（带反馈：成功 toast + 失败原因，避免「点击没反应」）。 */
+  /** 保存草稿（带反馈：成功 toast + 失败原因；成功后按钮变灰，草稿再变更时重新亮起）。 */
   const saveDraft = async (): Promise<void> => {
     try {
       await store.writeDraft(node.id, draft);
+      setSavedDraft(draft);
       store.showToast('草稿已保存', 'success');
-    } catch (err) {
-      store.showToast((err as Error).message, 'error');
-    }
-  };
-
-  /** 保存正式版（带反馈）。 */
-  const saveOfficial = async (): Promise<void> => {
-    try {
-      await store.writeOfficial(node.id, official);
-      store.showToast('正式版已保存', 'success');
     } catch (err) {
       store.showToast((err as Error).message, 'error');
     }
@@ -174,7 +171,6 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
       <div className="row">
         <button className="small-btn" onClick={() => void rename()}>重命名</button>
         <button className="small-btn" onClick={() => void addChild()}>＋ 子节点</button>
-        <button className="small-btn" onClick={() => void commit()}>提交为正式版（含子树）</button>
         <button className="small-btn" onClick={() => setShowVersions(!showVersions)}>
           {showVersions ? '收起版本历史' : '版本历史'}
         </button>
@@ -199,24 +195,22 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
         />
       )}
       {activeTab === 'draft' && (
-        <div className="row">
-          <button className="primary" onClick={() => void saveDraft()}>保存草稿</button>
+        <div className="row draft-actions">
+          <button className="primary" disabled={!draftChanged} onClick={() => void saveDraft()} title={draftChanged ? '保存草稿' : '草稿已是最新（改动后按钮重新亮起）'}>
+            保存草稿
+          </button>
+          <button className="commit-btn" onClick={() => void commit()} title="草稿复制为正式版，并写入版本历史（§5.5）">
+            提交为正式版（含子树）
+          </button>
           <span className="muted small">Ctrl+S 保存 · 提交正式版会把草稿复制为正式版（§5.5）</span>
         </div>
       )}
       {activeTab === 'official' && (
-        <MarkdownEditor
-          dataTestId="official-editor"
-          placeholder="正式版内容"
-          value={official}
-          onChange={setOfficial}
-          onSave={() => void saveOfficial()}
-          showMarkerCount={isScene}
-        />
-      )}
-      {activeTab === 'official' && (
-        <div className="row">
-          <button className="primary" onClick={() => void saveOfficial()}>保存正式版</button>
+        <div className="editor official-view">
+          <div className="compare-block" style={{ minHeight: 240 }}>
+            <MarkdownView text={official} />
+          </div>
+          <p className="muted small">正式版由「提交为正式版（含子树）」从草稿产生，只读查看；历史版本可在「版本历史」中恢复。</p>
         </div>
       )}
     </div>
@@ -259,13 +253,31 @@ function AssetView({ assetId }: { assetId: string }): React.ReactElement {
 
   if (!asset) return <div className="workspace-body"><p className="muted">设定不存在。</p></div>;
 
+  // 类型编辑：预设中文下拉 + 自定义兜底（存储值保持英文/自定义字符串）
+  const isKnownType = type in ASSET_TYPE_LABELS;
+
   return (
     <div className="workspace-body">
       <div className="ws-head"><h2>{asset.title || '（未命名）'}</h2></div>
       <div className="editor">
         <div className="row">
           <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="标题" style={{ flex: 1 }} />
-          <input value={type} onChange={(e) => setType(e.target.value)} placeholder="类型" style={{ width: 150 }} />
+          <select
+            value={isKnownType ? type : '__custom__'}
+            onChange={(e) => {
+              if (e.target.value === '__custom__') setType('');
+              else setType(e.target.value);
+            }}
+            style={{ width: 140 }}
+          >
+            {Object.entries(ASSET_TYPE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+            <option value="__custom__">自定义…</option>
+          </select>
+          {!isKnownType && (
+            <input value={type} onChange={(e) => setType(e.target.value)} placeholder="自定义类型" style={{ width: 120 }} />
+          )}
         </div>
         <MarkdownEditor
           placeholder="设定内容（markdown，自由格式）"

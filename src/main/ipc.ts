@@ -6,7 +6,7 @@
  * - run 的流式事件通过 webContents.send('run:event') 广播（平铺 payload）
  * - run:cancel 维护 AbortController 注册表
  */
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import { AppService } from './app-service';
 import type { RunStartRequest } from '../shared/ipc-types';
@@ -69,6 +69,15 @@ export function registerIpcHandlers(service: AppService): void {
 
   handle('project:open', (_event: Electron.IpcMainInvokeEvent, dir: string) => service.openProject(dir));
 
+  /**
+   * 删除项目（确认后永久操作）：校验 + 关闭（若打开中）→ 移到系统回收站
+   * （可恢复）。trashItem 失败向上抛，渲染层提示。
+   */
+  handle('project:delete', async (_event: Electron.IpcMainInvokeEvent, dir: string) => {
+    service.deleteProject(dir);
+    await shell.trashItem(dir);
+  });
+
   handle('project:pickFolder', async () => {
     const win = BrowserWindow.getFocusedWindow();
     const result = await dialog.showOpenDialog(win!, {
@@ -96,20 +105,7 @@ export function registerIpcHandlers(service: AppService): void {
   handle('asset:update', (_event: Electron.IpcMainInvokeEvent, assetId: string, updates: Record<string, string>) => service.updateAsset(assetId, updates));
   handle('asset:delete', (_event: Electron.IpcMainInvokeEvent, assetId: string) => service.deleteAsset(assetId));
 
-  // 附件（ux-review §3：粘贴长文本 / 上传 / 项目文件）
-  handle('attachment:add', (_event: Electron.IpcMainInvokeEvent, name: string, content: string, source?: string) => service.addAttachment(name, content, source as never));
-  handle('attachment:addFiles', (_event: Electron.IpcMainInvokeEvent, paths: string[]) => {
-    const fs = require('fs') as typeof import('fs');
-    let state: ReturnType<typeof service.addAttachment> | null = null;
-    for (const p of paths) {
-      try {
-        state = service.addAttachment(path.basename(p), fs.readFileSync(p, 'utf-8'), 'uploaded');
-      } catch {
-        /* 单个文件失败跳过 */
-      }
-    }
-    return state;
-  });
+  // 附件（ux-review §3：上传 / 项目文件；Part 3：上传只预读，发送时经 conversation:sendWithAttachments 落盘）
   handle('attachment:pickFiles', async () => {
     const win = BrowserWindow.getFocusedWindow();
     const result = await dialog.showOpenDialog(win!, {
@@ -118,19 +114,20 @@ export function registerIpcHandlers(service: AppService): void {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     const fs = require('fs') as typeof import('fs');
-    let state: ReturnType<typeof service.addAttachment> | null = null;
+    const out: Array<{ name: string; content: string }> = [];
     for (const p of result.filePaths) {
       try {
-        state = service.addAttachment(path.basename(p), fs.readFileSync(p, 'utf-8'), 'uploaded');
+        out.push({ name: path.basename(p), content: fs.readFileSync(p, 'utf-8') });
       } catch {
         /* 单个文件失败跳过 */
       }
     }
-    return state;
+    return out.length > 0 ? out : null;
   });
   handle('attachment:scanWorkspace', () => service.scanWorkspaceFiles());
-  handle('attachment:importWorkspace', (_event: Electron.IpcMainInvokeEvent, names: string[]) => service.importWorkspaceFiles(names));
+  handle('attachment:readWorkspace', (_event: Electron.IpcMainInvokeEvent, name: string) => service.readWorkspaceFile(name));
   handle('attachment:readContent', (_event: Electron.IpcMainInvokeEvent, attachmentId: string) => service.readAttachmentContent(attachmentId));
+  handle('attachment:delete', (_event: Electron.IpcMainInvokeEvent, attachmentId: string) => service.deleteAttachment(attachmentId));
 
   // ------------------------------------------------------------ 可见视图/正文（§6）
 
@@ -144,6 +141,8 @@ export function registerIpcHandlers(service: AppService): void {
   // ------------------------------------------------------------ 对话
 
   handle('conversation:send', (_event: Electron.IpcMainInvokeEvent, content: string) => service.sendMessage(content));
+  handle('conversation:sendWithAttachments', (_event: Electron.IpcMainInvokeEvent, content: string, attachments: Array<{ name: string; content: string; source?: string }>) =>
+    service.sendWithAttachments(content, attachments as Array<{ name: string; content: string; source?: import('../shared/types').Attachment['source'] }>));
   handle('conversation:newTopic', (_event: Electron.IpcMainInvokeEvent, title?: string) => service.newTopic(title));
   handle('conversation:switchSession', (_event: Electron.IpcMainInvokeEvent, sessionId: string) => service.switchSession(sessionId));
   handle('conversation:archiveSession', (_event: Electron.IpcMainInvokeEvent, sessionId: string) => service.archiveSession(sessionId));
@@ -179,6 +178,7 @@ export function registerIpcHandlers(service: AppService): void {
       .run(req, {
         onChunk: (text) => sendToWindow(event, { runId, type: 'chunk', text }),
         onReasoning: (reasoningContent) => sendToWindow(event, { runId, type: 'chunk', text: '', reasoningContent }),
+        onSearchStatus: (status) => sendToWindow(event, { runId, type: 'search', status }),
         onToolTrace: (trace) => sendToWindow(event, { runId, type: 'trace', trace }),
       }, controller.signal)
       .then((result) => {
@@ -208,6 +208,7 @@ export function registerIpcHandlers(service: AppService): void {
       .runDetailFill(sceneId, format, feedback, {
         onChunk: (text) => sendToWindow(event, { runId, type: 'chunk', text }),
         onReasoning: (reasoningContent) => sendToWindow(event, { runId, type: 'chunk', text: '', reasoningContent }),
+        onSearchStatus: (status) => sendToWindow(event, { runId, type: 'search', status }),
         onToolTrace: (trace) => sendToWindow(event, { runId, type: 'trace', trace }),
       }, controller.signal)
       .then((result) => {
@@ -239,6 +240,7 @@ export function registerIpcHandlers(service: AppService): void {
       .runRevise(sceneId, format, start, end, instruction, {
         onChunk: (text) => sendToWindow(event, { runId, type: 'chunk', text }),
         onReasoning: (reasoningContent) => sendToWindow(event, { runId, type: 'chunk', text: '', reasoningContent }),
+        onSearchStatus: (status) => sendToWindow(event, { runId, type: 'search', status }),
         onToolTrace: (trace) => sendToWindow(event, { runId, type: 'trace', trace }),
       }, controller.signal)
       .then((result) => {
@@ -264,6 +266,7 @@ export function registerIpcHandlers(service: AppService): void {
       .refreshMessage(messageId, {
         onChunk: (text) => sendToWindow(event, { runId, type: 'chunk', text }),
         onReasoning: (reasoningContent) => sendToWindow(event, { runId, type: 'chunk', text: '', reasoningContent }),
+        onSearchStatus: (status) => sendToWindow(event, { runId, type: 'search', status }),
         onToolTrace: (trace) => sendToWindow(event, { runId, type: 'trace', trace }),
       })
       .then((result) => {

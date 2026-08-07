@@ -81,6 +81,7 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
     const { service, model } = makeService([
       { type: 'final', answer: '## 已确认决策\n主角是侦探', usage: usage(50, 10) },
       { type: 'final', answer: '好的，继续。', usage: usage(30, 5) },
+      { type: 'final', answer: '会话标题', usage: usage(10, 3) }, // 首个 chat run 后的自动命名
     ]);
     // 先铺一条超预算对话（直接写日志）
     const path = longPath();
@@ -100,7 +101,8 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
     const summary = conv.readBranchSummary(anchor);
     expect(summary).toContain('## 已确认决策');
     // 模型第一次调用（chat run 第一轮）输入 = 摘要 + 最近原文
-    const input = model.inputs.at(-1)!;
+    // （倒数第二条：最后一次模型输入是会话标题生成，见用户反馈 2）
+    const input = model.inputs.at(-2)!;
     const contents = input.messages.map((m) => ('content' in m ? m.content : '')).join('\n');
     expect(contents).toContain('【已压缩的较早讨论摘要（锚点 #' + anchor + '）】');
     expect(contents).toContain('后话二'); // 保留的最近 6 条（m3..m8）
@@ -112,6 +114,7 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
       { type: 'final', answer: '首次摘要', usage: usage(10, 5) },
       { type: 'final', answer: '回答一', usage: usage(10, 5) },
       { type: 'final', answer: '回答二', usage: usage(10, 5) },
+      { type: 'final', answer: '会话标题', usage: usage(10, 3) }, // 自动命名
     ]);
     const path = longPath();
     const conv = service.workspace.conversation;
@@ -121,8 +124,9 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
 
     const before = model.inputs.length;
     await service.run({ kind: 'chat' });
-    expect(model.inputs.length).toBe(before + 1); // 只有 chat 一轮，无压缩调用
-    const input = model.inputs.at(-1)!;
+    // 只有 chat 一轮 + 会话标题一轮，无压缩调用（用户反馈 2）
+    expect(model.inputs.length).toBe(before + 2);
+    const input = model.inputs.at(-2)!;
     expect(input.messages.map((m) => ('content' in m ? m.content : '')).join('\n')).toContain('已存在的摘要');
   });
 
@@ -132,6 +136,9 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
       { type: 'tool_calls', toolCalls: [toolCall('t2', 'search_nodes', {})], usage: usage(1, 1) },
       { type: 'tool_calls', toolCalls: [toolCall('t3', 'search_nodes', {})], usage: usage(1, 1) },
       { type: 'final', answer: '原样回答', usage: usage(10, 2) },
+      { type: 'final', answer: '标题一', usage: usage(10, 2) }, // 自动命名（第一次 run）
+      { type: 'final', answer: '回答二', usage: usage(10, 2) }, // 第二次 run 的 chat
+      { type: 'final', answer: '标题二', usage: usage(10, 2) }, // 自动命名（第二次 run）
     ]);
     const path = longPath();
     const conv = service.workspace.conversation;
@@ -190,6 +197,7 @@ describe('M6 — 消息编辑分支（§3.2）', () => {
   it('编辑用户消息：不原地覆盖，旧尾部保留为分支，活动路径截断重走', async () => {
     const { service } = makeService([
       { type: 'final', answer: '回复一', usage: usage(5, 2) },
+      { type: 'final', answer: '会话标题', usage: usage(5, 1) }, // 自动命名
     ]);
     service.sendMessage('原始问题');
     const userMsg = service.getState().messages[0];
@@ -203,12 +211,11 @@ describe('M6 — 消息编辑分支（§3.2）', () => {
     expect(old.supersededBy).toBe(replacement.id);
     expect(replacement.content).toBe('修改后的问题');
     expect(replacement.supersedesId).toBe(userMsg.id);
-    // 「消息已编辑」系统事件保留旧文；活动路径末端 = 编辑记账事件（与会话 tail 一致）
-    const editEvent = state.messages.find((m) => m.role === 'system' && m.content.includes('消息已编辑'));
-    expect(editEvent).toBeTruthy();
-    expect(editEvent!.content).toContain('原始问题');
-    expect(state.activeMessageId).toBe(editEvent!.id);
-    expect(state.sessions[0].tailMessageId).toBe(editEvent!.id);
+    // 编辑只追加替换消息，无「消息已编辑」记账事件（旧文本由被取代消息保留；
+    // 旧文本不进模型上下文，防模型收到编辑前的内容）
+    expect(state.messages.some((m) => m.role === 'system' && m.content.includes('消息已编辑'))).toBe(false);
+    expect(state.activeMessageId).toBe(replacement.id);
+    expect(state.sessions[0].tailMessageId).toBe(replacement.id);
     // 旧尾部仍是原文的分支
     expect(state.messages.filter((m) => m.parentId === userMsg.id && m.role === 'ai')).toHaveLength(1);
   });
@@ -225,6 +232,7 @@ describe('M6 — 消息编辑分支（§3.2）', () => {
 describe('M6 — 附件失效标记（§4.3）', () => {
   it('整理范围消化过的附件记录 hash；重传/外部修改 → 附件行「已更新」', async () => {
     const { service, model } = makeService([
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'write_asset', { type: 'character', title: '主角', content: '侦探' })], usage: usage(5, 2) },
       { type: 'final', answer: '已结构化', usage: usage(5, 2) },
     ]);
     service.addAttachment('大纲.txt', '旧版本大纲内容');
@@ -239,7 +247,10 @@ describe('M6 — 附件失效标记（§4.3）', () => {
     const state = service.getState();
     expect(state.attachments[0].needsRestructure).toBe(true);
     // 重新整理全部（范围包含附件消息）→ 标记清除
-    model.replaceScript([{ type: 'final', answer: '重新结构化', usage: usage(5, 2) }]);
+    model.replaceScript([
+      { type: 'tool_calls', toolCalls: [toolCall('c2', 'write_asset', { type: 'location', title: '青石镇', content: '小镇' })], usage: usage(5, 2) },
+      { type: 'final', answer: '重新结构化', usage: usage(5, 2) },
+    ]);
     await service.run({ kind: 'organize', scope: { type: 'all' } });
     expect(service.getState().attachments[0].needsRestructure).toBeFalsy();
   });

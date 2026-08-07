@@ -1,4 +1,4 @@
-import type { LLMRequest, LLMResponse, LLMStreamChunk } from '../shared/llm-types';
+import type { LLMMessage, LLMRequest, LLMResponse, LLMStreamChunk, WebSearchCallItem } from '../shared/llm-types';
 import { DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL } from '../shared/llm-types';
 import type { LLMProvider } from '../shared/llm-types';
 import { loadApiKey } from './api-key-store';
@@ -9,11 +9,7 @@ interface DeepSeekMessage {
   content: string | null;
   /** 思维链（DeepSeek V4 思考模式；带 tools 的请求必须回传） */
   reasoning_content?: string;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
+  tool_calls?: LLMMessage['tool_calls'];
   tool_call_id?: string;
 }
 
@@ -23,10 +19,7 @@ interface DeepSeekRequestBody {
   stream: boolean;
   temperature?: number;
   max_tokens?: number;
-  tools?: Array<{
-    type: 'function';
-    function: { name: string; description: string; parameters: Record<string, unknown> };
-  }>;
+  tools?: LLMRequest['tools'];
   tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
   /** 思考模式开关（DeepSeek V4） */
   thinking?: { type: 'enabled' | 'disabled' };
@@ -168,8 +161,8 @@ function buildRequestBody(req: LLMRequest): DeepSeekRequestBody {
   if (req.tools) {
     body.tools = req.tools;
   }
-  if (req.tool_choice) {
-    body.tool_choice = req.tool_choice;
+  if (req.tool_choice && (typeof req.tool_choice === 'string' || req.tool_choice.type === 'function')) {
+    body.tool_choice = req.tool_choice as typeof body.tool_choice;
   }
   return body;
 }
@@ -408,3 +401,490 @@ export async function chatCompletionStream(
 }
 
 export { sanitizeForLog, buildRequestBody };
+
+// ===========================================================================
+// Responses API（POST /responses）——原生 web_search 联网搜索通道
+//
+// DeepSeek 官方仅在 Responses API 支持内置 web_search 工具（服务端执行搜索）。
+// 与 /chat/completions 的区别：
+// - 请求为无状态 input items（message / function_call / function_call_output /
+//   reasoning / web_search_call），多轮历史须全量回传
+// - 流式是语义化 SSE 事件（event: / data: 行，无 [DONE]），以
+//   response.completed / response.incomplete / response.failed 收尾
+// - web_search_call 输出 item 原样回传即可，服务端自动恢复搜索结果
+// ===========================================================================
+
+/** Responses API 输入 item。 */
+export type ResponsesInputItem =
+  | { type: 'message'; role: 'user' | 'assistant' | 'system'; content: string }
+  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'function_call_output'; call_id: string; output: string }
+  | { type: 'reasoning'; content: Array<{ type: 'reasoning_text'; text: string }> }
+  | { type: 'web_search_call'; id: string; status?: string; action: { type: string; queries?: string[] } };
+
+interface ResponsesRequestBody {
+  model: string;
+  input: ResponsesInputItem[];
+  stream: boolean;
+  temperature?: number;
+  max_output_tokens?: number;
+  tools?: Array<
+    | {
+        type: 'function';
+        name: string;
+        description: string;
+        parameters: Record<string, unknown>;
+      }
+    | { type: 'web_search' }
+  >;
+  tool_choice?: 'auto' | 'none' | { type: 'function'; name: string } | { type: 'web_search' };
+  reasoning?: { effort: 'none' | 'low' | 'high' | 'max' };
+}
+
+interface ResponsesOutputItem {
+  type?: string;
+  id?: string;
+  status?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  action?: { type: string; queries?: string[] };
+  content?: Array<{ type?: string; text?: string }>;
+}
+
+interface ResponsesResponse {
+  id: string;
+  status: string;
+  output?: ResponsesOutputItem[];
+  error?: { code?: string; message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+}
+
+/** 解析 Responses 输出 items → OpenAI 兼容形态。 */
+function parseResponsesOutput(output: ResponsesOutputItem[] | undefined): {
+  content: string;
+  reasoning: string;
+  toolCalls: NonNullable<LLMResponse['toolCalls']>;
+  webSearchCalls: WebSearchCallItem[];
+  hasMessage: boolean;
+} {
+  const content: string[] = [];
+  const reasoning: string[] = [];
+  const toolCalls: NonNullable<LLMResponse['toolCalls']> = [];
+  const webSearchCalls: WebSearchCallItem[] = [];
+  let hasMessage = false;
+  for (const item of output ?? []) {
+    if (item.type === 'message') {
+      hasMessage = true;
+      for (const block of item.content ?? []) {
+        if (block.type === 'output_text' && block.text) content.push(block.text);
+      }
+    } else if (item.type === 'reasoning') {
+      for (const block of item.content ?? []) {
+        if (block.type === 'reasoning_text' && block.text) reasoning.push(block.text);
+      }
+    } else if (item.type === 'function_call') {
+      toolCalls.push({
+        id: item.id ?? '',
+        type: 'function',
+        function: { name: item.name ?? '', arguments: item.arguments ?? '{}' },
+      });
+    } else if (item.type === 'web_search_call') {
+      webSearchCalls.push({ id: item.id ?? '', status: item.status, action: item.action ?? { type: 'search' } });
+    }
+  }
+  return { content: content.join(''), reasoning: reasoning.join(''), toolCalls, webSearchCalls, hasMessage };
+}
+
+/**
+ * finishReason 判定：
+ * - 有 function_call → 'tool_calls'（本地工具轮）
+ * - 只有 web_search_call（无 message）→ 'tool_calls'（服务端搜索轮，回传后下轮出答案）
+ * - 有 web_search_call 且带 message → 'stop'（服务端已自动完成搜索+回答）
+ * - 其余 → 'stop'
+ */
+function responsesFinishReason(parsed: {
+  toolCalls: unknown[];
+  webSearchCalls: unknown[];
+  hasMessage: boolean;
+}): 'stop' | 'tool_calls' {
+  if (parsed.toolCalls.length > 0) return 'tool_calls';
+  if (parsed.webSearchCalls.length > 0 && !parsed.hasMessage) return 'tool_calls';
+  return 'stop';
+}
+
+/**
+ * OpenAI 消息列表 → Responses input items。
+ *
+ * - assistant(tool_calls) 拆成 function_call / web_search_call item
+ * - tool 消息转 function_call_output；对应 web_search_call 的结果丢弃
+ *   （服务端自动恢复搜索结果，无需回传结果）
+ * - 思维链（reasoning_content）转 reasoning item（明文回传）
+ * - web_search_call 从调用方缓存取原始 item 原样回传
+ */
+export function messagesToResponsesInput(
+  messages: LLMMessage[],
+  webSearchItems: Map<string, WebSearchCallItem>,
+): ResponsesInputItem[] {
+  const webSearchIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if (tc.type === 'web_search') webSearchIds.add(tc.id);
+      }
+    }
+  }
+  const items: ResponsesInputItem[] = [];
+  for (const m of messages) {
+    if (m.role === 'tool') {
+      // web_search_call 无对应工具结果：服务端自动恢复搜索结果，丢弃
+      if (webSearchIds.has(m.tool_call_id ?? '')) continue;
+      items.push({ type: 'function_call_output', call_id: m.tool_call_id ?? '', output: m.content ?? '' });
+      continue;
+    }
+    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      for (const tc of m.tool_calls) {
+        if (tc.type === 'web_search') {
+          const cached = webSearchItems.get(tc.id);
+          items.push(
+            cached
+              ? { type: 'web_search_call', id: cached.id, status: cached.status, action: cached.action }
+              : { type: 'web_search_call', id: tc.id, action: { type: 'search' } },
+          );
+        } else {
+          items.push({ type: 'function_call', call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
+        }
+      }
+      continue;
+    }
+    const role = m.role === 'system' ? 'system' : m.role === 'assistant' ? 'assistant' : 'user';
+    if (m.role === 'assistant' && m.reasoning_content) {
+      items.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: m.reasoning_content }] });
+    }
+    items.push({ type: 'message', role, content: m.content ?? '' });
+  }
+  return items;
+}
+
+/** 构造 /responses 请求体（thinking/reasoning_effort 映射为 reasoning.effort）。 */
+export function buildResponsesRequestBody(
+  req: LLMRequest,
+  webSearchItems: Map<string, WebSearchCallItem>,
+): ResponsesRequestBody {
+  const extras = currentRequestExtras();
+  const body: ResponsesRequestBody = {
+    model: req.model ?? extras.model,
+    input: messagesToResponsesInput(req.messages, webSearchItems),
+    stream: req.stream,
+    temperature: req.temperature,
+  };
+  if (req.maxTokens) body.max_output_tokens = req.maxTokens;
+  const thinking = req.thinking ?? extras.thinking ?? { type: 'enabled' as const };
+  const effort = req.reasoningEffort ?? extras.reasoningEffort;
+  if (thinking.type === 'disabled') {
+    body.reasoning = { effort: 'none' };
+  } else {
+    body.reasoning = { effort: effort === 'max' ? 'max' : effort === 'low' ? 'low' : 'high' };
+  }
+  if (req.tools) {
+    // Responses API 的 function 工具是扁平结构（type/name/description/parameters 同级），
+    // 与 chat/completions 的嵌套 function 格式不同，需转换；web_search 无参数。
+    body.tools = (req.tools as Array<
+      | { type: 'web_search' }
+      | { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
+    >).map((t) =>
+      t.type === 'web_search'
+        ? { type: 'web_search' }
+        : { type: 'function', name: t.function.name, description: t.function.description, parameters: t.function.parameters },
+    );
+  }
+  if (req.tool_choice) {
+    if (typeof req.tool_choice === 'string') {
+      body.tool_choice = req.tool_choice;
+    } else if (req.tool_choice.type === 'web_search') {
+      body.tool_choice = { type: 'web_search' };
+    } else {
+      body.tool_choice = { type: 'function', name: req.tool_choice.function.name };
+    }
+  }
+  return body;
+}
+
+async function postResponses(
+  body: ResponsesRequestBody,
+  apiKey: string,
+  signal: AbortSignal | undefined,
+  timeout: ReturnType<typeof withTimeout>,
+): Promise<Response> {
+  return Promise.race([
+    fetch(`${DEEPSEEK_BASE_URL}/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+      signal: timeout.signal,
+    }),
+    timeout.promise,
+  ]);
+}
+
+/**
+ * 非流式 /responses 调用。返回 OpenAI 兼容 LLMResponse；
+ * web_search_call 原样放入 webSearchCalls（供回传缓存）。
+ */
+export async function responsesCompletion(
+  req: LLMRequest,
+  webSearchItems: Map<string, WebSearchCallItem>,
+  signal?: AbortSignal,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<LLMResponse> {
+  const apiKey = getApiKey('deepseek');
+  const body = buildResponsesRequestBody({ ...req, stream: false }, webSearchItems);
+  const timeout = withTimeout(signal, timeoutMs);
+
+  let response: Response;
+  try {
+    response = await postResponses(body, apiKey, signal, timeout);
+  } catch (err) {
+    timeout.clear();
+    const e = err as Error & { code?: string };
+    if (e.code === 'network_error') throw err;
+    if (e.name === 'AbortError') {
+      throw Object.assign(new Error(`DeepSeek 请求超时（${Math.round(timeoutMs / 1000)}s）或已取消`), { code: 'network_error' });
+    }
+    throw Object.assign(new Error(`DeepSeek 网络错误：${e.message}`), { code: 'network_error' });
+  }
+  timeout.clear();
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    const code =
+      response.status === 401 ? 'auth_error' :
+      response.status === 429 ? 'rate_limit' :
+      response.status >= 500 ? 'server_error' :
+      'unknown';
+    throw Object.assign(
+      new Error(`DeepSeek Responses API error (${response.status}): ${errorText}`),
+      { code, statusCode: response.status }
+    );
+  }
+
+  const data: ResponsesResponse = await response.json();
+  if (data.status === 'failed' || data.error) {
+    throw Object.assign(new Error(`DeepSeek Responses API error: ${data.error?.message ?? 'failed'}`), { code: 'server_error' });
+  }
+
+  const parsed = parseResponsesOutput(data.output);
+  return {
+    id: data.id,
+    content: parsed.content,
+    reasoningContent: parsed.reasoning || undefined,
+    finishReason: responsesFinishReason(parsed),
+    toolCalls: parsed.toolCalls.length > 0 ? parsed.toolCalls : undefined,
+    webSearchCalls: parsed.webSearchCalls.length > 0 ? parsed.webSearchCalls : undefined,
+    usage: {
+      promptTokens: data.usage?.input_tokens ?? 0,
+      completionTokens: data.usage?.output_tokens ?? 0,
+      totalTokens: data.usage?.total_tokens ?? 0,
+    },
+  };
+}
+
+interface ResponsesStreamEvent {
+  type: string;
+  sequence_number?: number;
+  output_index?: number;
+  item?: ResponsesOutputItem;
+  delta?: string;
+  response?: ResponsesResponse & {
+    output?: ResponsesOutputItem[];
+    usage?: ResponsesResponse['usage'];
+    incomplete_details?: { reason?: string } | null;
+  };
+}
+
+/**
+ * 流式 /responses 调用（语义化 SSE 事件）。
+ *
+ * 事件 → LLMStreamChunk 映射：
+ * - response.output_text.delta → content
+ * - response.reasoning_text.delta → reasoningContent
+ * - response.output_item.added(function_call) + function_call_arguments.delta → toolCalls
+ * - response.web_search_call.* → searchStatus
+ * - response.completed/incomplete/failed → 末尾 usage chunk（含 finishReason 与 webSearchCalls）
+ */
+export async function responsesStream(
+  req: LLMRequest,
+  webSearchItems: Map<string, WebSearchCallItem>,
+  onChunk: (chunk: LLMStreamChunk) => void,
+  signal?: AbortSignal,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  idleMs = STREAM_IDLE_TIMEOUT_MS,
+): Promise<void> {
+  const apiKey = getApiKey('deepseek');
+  const body = buildResponsesRequestBody({ ...req, stream: true }, webSearchItems);
+  const timeout = withTimeout(signal, timeoutMs);
+
+  let response: Response;
+  try {
+    response = await postResponses(body, apiKey, signal, timeout);
+  } catch (err) {
+    timeout.clear();
+    const e = err as Error & { code?: string };
+    if (e.code === 'network_error') throw err;
+    if (e.name === 'AbortError') {
+      throw Object.assign(new Error(`DeepSeek 请求超时（${Math.round(timeoutMs / 1000)}s）或已取消`), { code: 'network_error' });
+    }
+    throw Object.assign(new Error(`DeepSeek 网络错误：${e.message}`), { code: 'network_error' });
+  }
+  timeout.clear();
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    const code =
+      response.status === 401 ? 'auth_error' :
+      response.status === 429 ? 'rate_limit' :
+      response.status >= 500 ? 'server_error' :
+      'unknown';
+    throw Object.assign(
+      new Error(`DeepSeek Responses API error (${response.status}): ${errorText}`),
+      { code, statusCode: response.status }
+    );
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw Object.assign(new Error('Response body is not readable'), { code: 'network_error' });
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = '';
+  const dataLines: string[] = [];
+
+  const flushData = (): void => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join('\n');
+    dataLines.length = 0;
+    const eventName = currentEvent;
+    currentEvent = '';
+    let parsed: ResponsesStreamEvent;
+    try {
+      parsed = JSON.parse(raw) as ResponsesStreamEvent;
+    } catch {
+      return;
+    }
+    const type = eventName || parsed.type;
+    const emit = (chunk: LLMStreamChunk): void => { try { onChunk(chunk); } catch { /* 调用方隔离 */ } };
+
+    switch (type) {
+      case 'response.output_item.added': {
+        const item = parsed.item;
+        if (!item) break;
+        if (item.type === 'function_call') {
+          emit({
+            content: '',
+            finishReason: null,
+            toolCalls: [{ index: parsed.output_index ?? 0, id: item.id, type: 'function', function: { name: item.name, arguments: '' } }],
+          });
+        } else if (item.type === 'web_search_call') {
+          if (item.id) {
+            webSearchItems.set(item.id, { id: item.id, status: item.status, action: item.action ?? { type: 'search' } });
+          }
+          emit({ content: '', finishReason: null, searchStatus: 'searching' });
+        }
+        break;
+      }
+      case 'response.output_text.delta':
+        emit({ content: parsed.delta ?? '', finishReason: null });
+        break;
+      case 'response.reasoning_text.delta':
+        emit({ content: '', finishReason: null, reasoningContent: parsed.delta ?? '' });
+        break;
+      case 'response.function_call_arguments.delta':
+        emit({
+          content: '',
+          finishReason: null,
+          toolCalls: [{ index: parsed.output_index ?? 0, function: { arguments: parsed.delta ?? '' } }],
+        });
+        break;
+      case 'response.web_search_call.in_progress':
+      case 'response.web_search_call.searching':
+        emit({ content: '', finishReason: null, searchStatus: 'searching' });
+        break;
+      case 'response.web_search_call.completed':
+        emit({ content: '', finishReason: null, searchStatus: 'completed' });
+        break;
+      case 'response.completed':
+      case 'response.incomplete':
+      case 'response.failed': {
+        const full = parsed.response;
+        if (full?.status === 'failed' || full?.error) {
+          throw Object.assign(
+            new Error(`DeepSeek Responses API error: ${full?.error?.message ?? 'failed'}`),
+            { code: 'server_error' },
+          );
+        }
+        const out = parseResponsesOutput(full?.output);
+        const reason =
+          full?.incomplete_details?.reason === 'max_output_tokens' ? 'length' :
+          full?.incomplete_details?.reason === 'content_filter' ? 'content_filter' :
+          responsesFinishReason(out);
+        const webCalls = out.webSearchCalls.length > 0 ? out.webSearchCalls : undefined;
+        emit({
+          content: '',
+          finishReason: reason,
+          webSearchCalls: webCalls,
+          usage: {
+            promptTokens: full?.usage?.input_tokens ?? 0,
+            completionTokens: full?.usage?.output_tokens ?? 0,
+            totalTokens: full?.usage?.total_tokens ?? 0,
+          },
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  };
+
+  try {
+    while (true) {
+      const idle = idleTimeout(idleMs);
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        const result = await Promise.race([reader.read(), idle.promise]);
+        done = result.done;
+        value = result.value;
+      } catch (err) {
+        if ((err as { code?: string }).code === 'stream_timeout') {
+          throw Object.assign(new Error(`DeepSeek 流空闲超时（${Math.round(idleMs / 1000)}s 无数据）`), { code: 'network_error' });
+        }
+        throw Object.assign(new Error(`DeepSeek 流读取失败：${(err as Error).message}`), { code: 'network_error' });
+      } finally {
+        idle.clear();
+      }
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim();
+        } else if (trimmed.startsWith('data:')) {
+          dataLines.push(trimmed.slice(5).trimStart());
+        } else if (!trimmed) {
+          // SSE 事件以空行分隔
+          flushData();
+        }
+      }
+    }
+    flushData();
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}

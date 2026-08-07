@@ -115,8 +115,10 @@ export class ConversationRepository {
   }
 
   /**
-   * 读取消息树视图：填充派生字段 childrenIds（parentId === id 的消息）
-   * 与 supersededBy（supersedesId === id 的消息）。日志行本身不改写。
+   * 读取消息树视图：填充派生字段 childrenIds（parentId === id 的消息）、
+   * supersededBy（supersedesId === id 的消息）与版本元数据
+   * versionGroupId / versionIndex / versionCount（DeepSeek 式 ◀ i/N ▶ 导航）。
+   * 日志行本身不改写。
    */
   readMessagesWithTree(): ChatMessage[] {
     const messages = this.readMessages();
@@ -130,6 +132,26 @@ export class ConversationRepository {
         const target = byId.get(m.supersedesId)!;
         target.supersededBy = m.id;
       }
+    }
+    // 版本组：沿 supersedesId 链回溯根；组内按日志顺序编号（编辑/刷新多次 → 1/3、2/3、3/3）
+    const rootOf = new Map<string, string>();
+    const chainRoot = (id: string): string => {
+      const known = rootOf.get(id);
+      if (known) return known;
+      const m = byId.get(id);
+      const root = m?.supersedesId ? chainRoot(m.supersedesId) : id;
+      rootOf.set(id, root);
+      return root;
+    };
+    for (const m of messages) m.versionGroupId = chainRoot(m.id);
+    const counts = new Map<string, number>();
+    for (const m of messages) counts.set(m.versionGroupId!, (counts.get(m.versionGroupId!) ?? 0) + 1);
+    const seen = new Map<string, number>();
+    for (const m of messages) {
+      const index = (seen.get(m.versionGroupId!) ?? 0) + 1;
+      seen.set(m.versionGroupId!, index);
+      m.versionIndex = index;
+      m.versionCount = counts.get(m.versionGroupId!)!;
     }
     return messages;
   }
@@ -197,12 +219,33 @@ export class ConversationRepository {
 
   setActiveMessage(messageId: string): void {
     if (!this.getMessage(messageId)) throw new Error(`MESSAGE_NOT_FOUND: ${messageId}`);
-    this.updateMeta({ activeMessageId: messageId });
+    // DeepSeek 式版本/分支切换：下探到目标消息的最深续写尾（沿 childrenIds
+    // 按日志顺序最后一条递归），使切到中间版本/分支时完整续写链可见，
+    // 继续发送自然接在续写链末尾（§3.2 活动路径）。
+    const target = this.deepestTailId(messageId);
+    this.updateMeta({ activeMessageId: target });
     // 分支切换（刷新/编辑/回看）后，活动路径末端变了 → 同步当前会话尾部。
     // 归档会话完全只读（ux-review §4.5）：尾部冻结，只允许查看，不推进。
     const sid = this.readMeta().activeSessionId;
     if (sid && !(this.getSession(sid)?.archived ?? false)) {
-      this.advanceActiveSessionTail(messageId);
+      this.advanceActiveSessionTail(target);
+    }
+  }
+
+  /** 目标消息沿 childrenIds（日志顺序最后一条）下探到叶子（最深续写尾）。 */
+  private deepestTailId(messageId: string): string {
+    const byParent = new Map<string, string[]>();
+    for (const m of this.readMessages()) {
+      if (!m.parentId) continue;
+      const list = byParent.get(m.parentId) ?? [];
+      list.push(m.id);
+      byParent.set(m.parentId, list);
+    }
+    let current = messageId;
+    while (true) {
+      const children = byParent.get(current) ?? [];
+      if (children.length === 0) return current;
+      current = children[children.length - 1];
     }
   }
 
@@ -290,6 +333,7 @@ export class ConversationRepository {
     const session: ConversationSession = {
       id: generateId('sess'),
       title,
+      titleAuto: true,
       ...(tailMessageId ? { tailMessageId, rootMessageId } : {}),
       archivedAt: new Date().toISOString(),
     };
@@ -320,6 +364,7 @@ export class ConversationRepository {
     const session: ConversationSession = {
       id: generateId('sess'),
       title: title?.trim() || `话题 ${(meta.sessions ?? []).length + 1}`,
+      titleAuto: true,
       archivedAt: new Date().toISOString(),
     };
     this.updateMeta({
@@ -358,6 +403,11 @@ export class ConversationRepository {
     const next = [...sessions];
     next[idx] = { ...next[idx], ...patch };
     this.updateMeta({ sessions: next });
+  }
+
+  /** AI 自动命名（ChatGPT 式）：写入 AI 生成的标题并清除占位标记。 */
+  setSessionTitle(sessionId: string, title: string): void {
+    this.patchSession(sessionId, { title, titleAuto: false });
   }
 
   /**
@@ -487,10 +537,11 @@ export class ConversationRepository {
   // ------------------------------------------------------------------ 编辑分支
 
   /**
-   * 编辑用户消息 → 分支（§3.2）：不原地覆盖。追加一条新用户消息
-   * （supersedesId 指向原文，活动路径从该点截断重走），原文保留，
-   * 其旧尾部保留为兄弟分支；另追加「消息已编辑」系统事件保留旧文。
-   * 原始日志永不改写（§7.1）。
+   * 编辑用户消息 → 新版本（§3.2）：不原地覆盖。追加一条新用户消息
+   * （supersedesId 指向原文，活动路径从该点截断重走），原文保留为旧版本
+   * （◀ ▶ 版本导航查看）。不追加「消息已编辑」记账事件——旧文本由被取代
+   * 消息本身保留在日志，编辑后进入模型上下文的新版本不应携带旧文本
+   * （防止模型收到编辑前的旧内容）。原始日志永不改写（§7.1）。
    */
   editMessage(messageId: string, newContent: string): ChatMessage {
     const target = this.getMessage(messageId);
@@ -509,15 +560,11 @@ export class ConversationRepository {
       supersedesId: messageId,
       refs: target.refs,
     };
-    this.appendMessage(replacement);
-    this.appendMessage({
-      id: generateId('msg'),
-      role: 'system',
-      content: `（消息已编辑）原内容：\n${target.content}`,
-      timestamp: now,
-      parentId: replacement.id,
-    });
-    // 尾部已由 appendMessage 推进（活动路径 = 新分支 + 编辑记账事件，与会话 tail 一致）
+    // 根级消息的替换必须显式保持根级：appendMessage 对无 parentId 的消息
+    // 会自动挂到活动路径末端（即原文自身）——那会让旧版本变成新版本的父亲，
+    // 旧文本随之进入模型上下文。
+    this.appendMessage(replacement, { root: target.parentId === undefined });
+    // 尾部已由 appendMessage 推进（活动路径 = 新版本，与会话 tail 一致）
     return replacement;
   }
 }

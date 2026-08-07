@@ -31,7 +31,11 @@ function makeProjectState(): ProjectState {
     ],
     assets: [],
     attachments: [],
-    messages: [msg('m1', 'user', '主角是侦探'), msg('m2', 'ai', '明白。', 'm1')],
+    messages: [
+      msg('m1', 'user', '主角是侦探'),
+      msg('rs', 'system', '运行开始（chat）', 'm1'),
+      msg('m2', 'ai', '明白。', 'rs'),
+    ],
     sessions: [{ id: 'sess1', title: '话题 1', tailMessageId: 'm2', rootMessageId: 'm1', archivedAt: 't' }],
     activeSessionId: 'sess1',
     activeMessageId: 'm2',
@@ -51,6 +55,7 @@ function makeApi(): RendererApi {
       create: vi.fn(async () => project),
       open: vi.fn(async () => project),
       pickFolder: vi.fn(async () => null),
+      delete: vi.fn(async () => {}),
     },
     state: { get: vi.fn(async () => project) },
     outline: {
@@ -69,12 +74,11 @@ function makeApi(): RendererApi {
       delete: vi.fn(async () => project),
     },
     attachment: {
-      add: vi.fn(async () => project),
-      addFiles: vi.fn(async () => project),
-      pickFiles: vi.fn(async () => project),
+      pickFiles: vi.fn(async () => [{ name: '旧大纲.txt', content: '大纲内容' }]),
       scanWorkspace: vi.fn(async () => [{ name: '旧大纲.txt', size: 10 }]),
-      importWorkspace: vi.fn(async () => project),
+      readWorkspace: vi.fn(async () => ({ name: '旧大纲.txt', content: '大纲内容' })),
       readContent: vi.fn(async () => ({ name: '旧大纲.txt', content: '大纲内容' })),
+      delete: vi.fn(async () => project),
     },
     visibleView: {
       read: vi.fn(async () => null),
@@ -90,6 +94,7 @@ function makeApi(): RendererApi {
     },
     conversation: {
       send: vi.fn(async () => project),
+      sendWithAttachments: vi.fn(async () => project),
       newTopic: vi.fn(async () => project),
       switchSession: vi.fn(async () => project),
       archiveSession: vi.fn(async () => project),
@@ -160,6 +165,22 @@ function makeStatefulApi(): RendererApi {
       sessions = sessions.map((s) => (s.id === activeSessionId ? { ...s, tailMessageId: id, rootMessageId: s.rootMessageId ?? id } : s));
       return state();
     }),
+    sendWithAttachments: vi.fn(async (content: string, attachments: Array<{ name: string; content: string }>) => {
+      let parent = messages.find((m) => m.id === activeMessageId);
+      for (const a of attachments) {
+        const id = `m${seq++}`;
+        messages = [...messages, { ...msg(id, 'user', `（附件：${a.name}）`, parent ? parent.id : undefined), refs: { attachmentIds: [`att-${id}`] } }];
+        parent = messages.at(-1);
+      }
+      if (content.trim() !== '') {
+        const id = `m${seq++}`;
+        messages = [...messages, msg(id, 'user', content, parent ? parent.id : undefined)];
+        parent = messages.at(-1);
+      }
+      activeMessageId = parent?.id;
+      sessions = sessions.map((s) => (s.id === activeSessionId ? { ...s, tailMessageId: parent?.id, rootMessageId: s.rootMessageId ?? parent?.id } : s));
+      return state();
+    }),
     newTopic: vi.fn(async () => {
       const sid = `sess${seq++}`;
       sessions = [...sessions, { id: sid, title: `话题 ${sessions.length + 1}`, archivedAt: 't' }];
@@ -219,6 +240,31 @@ afterEach(() => {
 });
 
 describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）', () => {
+  it('项目删除（项目级）：列表行 🗑 → 确认 → 调 project.delete 并回到项目列表', async () => {
+    const api = makeApi();
+    const projects: Array<{ dir: string; name: string; createdAt: string }> = [{ dir: '/proj', name: '测试项目', createdAt: 't' }];
+    const del = vi.fn(async () => { projects.length = 0; }); // 删除后刷新列表为空
+    api.project.delete = del;
+    api.project.list = vi.fn(async () => [...projects]);
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    // 项目屏：列表行有删除按钮
+    expect(screen.getByText('测试项目')).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('删除项目（移到系统回收站，可恢复）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 确认弹窗（danger）
+    expect(screen.getByText(/删除项目「测试项目」/)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByText('移到回收站'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(del).toHaveBeenCalledWith('/proj');
+    // 列表已刷新（删除后为空）
+    expect(screen.queryByText('测试项目')).toBeNull();
+  });
   it('项目屏幕渲染，创建项目后讨论模块完整显示', async () => {
     await renderApp();
     // 项目屏幕
@@ -245,6 +291,10 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
     expect(screen.getByText('＋ 开启新话题')).toBeTruthy();
     expect(screen.getByText('归档当前话题')).toBeTruthy();
     expect(screen.getByTestId('chat-input')).toBeTruthy();
+    // 用户反馈 8：运行开始/结束细条不再显示（记账 system 消息不渲染）
+    expect(screen.queryByText(/运行开始（|运行结束（/)).toBeNull();
+    // 用户反馈 9：AI 回答没有编辑按钮（仅用户消息可编辑）
+    expect(screen.getAllByText('✎ 编辑')).toHaveLength(1);
   });
 
   it('对话发送后流式 chunk 渲染，无白屏', async () => {
@@ -283,8 +333,7 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
     expect(screen.getByTestId('chat-input')).toBeTruthy();
   });
 
-  it('场景节点：右栏收敛（无可见视图/正文 tab）；正文模块内闭环（ux-review §4.6、§5.1）', async () => {
-    await renderApp();
+  it('场景节点：右栏收敛（无可见视图/正文 tab）；正文模块内闭环（ux-review §4.6、§5.1）', async () => {    await renderApp();
     fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
     await act(async () => {
       fireEvent.click(screen.getByTestId('project-create'));
@@ -352,6 +401,140 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
     expect(screen.queryByText(/已生成 → 打开|运行开始（|运行结束（/)).toBeNull();
     expect(screen.queryByText(/已完成场景/)).toBeNull();
   });
+
+  it('重新生成（DeepSeek 式）：按钮常驻最后一条 AI 回答下方；生成新版本后出现 ◀ ▶ 导航', async () => {
+    const base = makeProjectState();
+    const versioned = makeProjectState();
+    versioned.messages = [
+      msg('m1', 'user', '写个开头'),
+      { ...msg('m2', 'ai', '回答 v1', 'm1'), timestamp: 't', supersededBy: 'm3', versionGroupId: 'm2', versionIndex: 1, versionCount: 2 },
+      { ...msg('m3', 'ai', '回答 v2', 'm1'), timestamp: 't', supersedesId: 'm2', versionGroupId: 'm2', versionIndex: 2, versionCount: 2 },
+    ];
+    versioned.activeMessageId = 'm3';
+    versioned.sessions = [{ id: 'sess1', title: '话题 1', tailMessageId: 'm3', rootMessageId: 'm1', archivedAt: 't' }];
+    let refreshed = false;
+    const api = makeApi();
+    api.state.get = vi.fn(async () => (refreshed ? versioned : base));
+    api.project.create = vi.fn(async () => base);
+    api.project.open = vi.fn(async () => base);
+    const refresh = vi.fn(async (messageId: string) => {
+      expect(messageId).toBe('m2');
+      refreshed = true;
+      return { runId: 'run_rf' };
+    });
+    api.run.refresh = refresh;
+    // ◀ 切回旧版本：返回 activeMessageId = m2 的状态
+    api.conversation.switchBranch = vi.fn(async () => ({
+      ...versioned,
+      activeMessageId: 'm2',
+      sessions: [{ ...versioned.sessions[0], tailMessageId: 'm2' }],
+    }));
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 重新生成按钮常驻（不依赖 hover），点击 → refresh('m2')
+    const regenBtn = screen.getByText('⟳ 重新生成');
+    expect(regenBtn).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(regenBtn);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(refresh).toHaveBeenCalledWith('m2');
+    // 运行中：按钮禁用（防并发 run）
+    expect((screen.getByText('⟳ 重新生成') as HTMLButtonElement).disabled).toBe(true);
+
+    // 完成 → 状态刷新为新版本 → 头部出现 ◀ 2/2 ▶ 版本导航，重新生成仍在
+    await act(async () => {
+      store.applyRunEvent({
+        runId: 'run_rf',
+        type: 'done',
+        result: { runId: 'run_rf', taskKind: 'chat', finalAnswer: '回答 v2', turns: 1, toolCallCount: 0, changes: [], cancelled: false },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.getByText('2/2')).toBeTruthy();
+    expect(screen.getByText('⟳ 重新生成')).toBeTruthy();
+    // ◀ 切回旧版本
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('上一个版本'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('回答 v1')).toBeTruthy();
+  });
+
+  it('版本导航（DeepSeek 式 ◀ i/N ▶）：刷新后的消息显示 2/2，◀ 切换调用 switchBranch；「消息已编辑」事件隐藏', async () => {
+    const versioned = makeProjectState();
+    versioned.messages = [
+      msg('m1', 'user', '写个开头'),
+      { ...msg('m2', 'ai', '回答 v1', 'm1'), timestamp: 't', supersededBy: 'm3', versionGroupId: 'm2', versionIndex: 1, versionCount: 2 },
+      { ...msg('m3', 'ai', '回答 v2', 'm1'), timestamp: 't', supersedesId: 'm2', versionGroupId: 'm2', versionIndex: 2, versionCount: 2 },
+      { ...msg('evt', 'system', '（消息已编辑）原内容：旧文本', 'm3'), timestamp: 't' },
+    ];
+    versioned.sessions = [{ id: 'sess1', title: '话题 1', tailMessageId: 'm3', rootMessageId: 'm1', archivedAt: 't' }];
+    versioned.activeMessageId = 'm3';
+    const api = makeApi();
+    api.state.get = vi.fn(async () => versioned);
+    api.project.create = vi.fn(async () => versioned);
+    api.project.open = vi.fn(async () => versioned);
+    const switchBranch = vi.fn(async () => versioned);
+    api.conversation.switchBranch = switchBranch;
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 当前版本 2/2 可见；旧版本消息与「消息已编辑」事件均不渲染
+    expect(screen.getByText('2/2')).toBeTruthy();
+    expect(screen.queryByText('回答 v1')).toBeNull();
+    expect(screen.queryByText(/消息已编辑/)).toBeNull();
+    // ◀ 点击 → switchBranch 到上一个版本（m2）
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('上一个版本'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(switchBranch).toHaveBeenCalledWith('m2');
+    // ▶ 为端点 → 禁用
+    expect((screen.getByTitle('下一个版本') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('就地编辑（DeepSeek 式）：✎ → 消息体变 textarea → 发送调 edit，取消恢复', async () => {
+    const api = makeApi();
+    const edit = vi.fn(async () => makeProjectState());
+    api.conversation.edit = edit;
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 点击用户消息的 ✎ 编辑 → textarea 出现
+    await act(async () => {
+      fireEvent.click(screen.getAllByText('✎ 编辑')[0]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const ta = document.querySelector('.msg-edit textarea') as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+    fireEvent.change(ta, { target: { value: '写个开头（修改版）' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('发送（Enter）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(edit).toHaveBeenCalledWith('m1', '写个开头（修改版）');
+  });
 });
 
 describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', () => {
@@ -382,6 +565,9 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
     });
     expect(screen.queryByText('话题一：主角是侦探')).toBeNull();
     expect(screen.getByTestId('chat-input')).toBeTruthy(); // 新话题可继续聊
+
+    // 用户反馈 3：当前话题为空（尚无消息）→「开启新话题」禁用
+    expect((screen.getByText('＋ 开启新话题') as HTMLButtonElement).disabled).toBe(true);
 
     // 会话 tab：两条活跃对话（无归档分组）
     fireEvent.click(screen.getByRole('button', { name: /会话/ }));
@@ -416,10 +602,15 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
     // 消息仍可查看（复制等只读操作保留，编辑/重新生成隐藏）
     expect(screen.getByText('话题一：主角是侦探')).toBeTruthy();
     expect(screen.queryByText('✎ 编辑')).toBeNull();
+    expect(screen.queryByText('⟳ 重新生成')).toBeNull();
 
-    // 会话 tab：取消归档 → 输入区恢复
+    // 会话 tab：右键话题 → 菜单中「取消归档」→ 输入区恢复（用户反馈 2：归档/删除走右键菜单）
     fireEvent.click(screen.getByRole('button', { name: /会话/ }));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => {
+      fireEvent.contextMenu(screen.getByText('话题 1'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
     await act(async () => {
       fireEvent.click(screen.getByText('取消归档'));
       await new Promise((r) => setTimeout(r, 0));
@@ -427,12 +618,17 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
     expect(screen.getByTestId('chat-input')).toBeTruthy();
   });
 
-  it('删除会话：从会话列表移除，消息不可见', async () => {
+  it('删除会话：右键菜单 → 删除 → 确认后从会话列表移除，消息不可见', async () => {
     await openProject();
     fireEvent.click(screen.getByRole('button', { name: /会话/ }));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // 右键菜单（用户反馈 2）触发删除
     await act(async () => {
-      fireEvent.click(screen.getByText('删除'));
+      fireEvent.contextMenu(screen.getByText('话题 1'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('删除…'));
       await new Promise((r) => setTimeout(r, 0));
     });
     // 确认弹窗

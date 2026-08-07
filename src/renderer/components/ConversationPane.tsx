@@ -1,17 +1,18 @@
 /**
  * ConversationPane.tsx — 全局对话（§3.2、§5.1）。
  *
- * - 消息流（流式 / 工具追踪 / markdown 渲染 / 分支 popover）
- * - 刷新（对最后一条 AI 消息重新生成）、分支切换、开启新话题、就地编辑消息（§3.2）
+ * - 消息流（流式 / 工具追踪 / markdown 渲染 / 版本导航 ◀ i/N ▶）
+ * - 刷新（对最后一条 AI 消息重新生成）、版本切换、开启新话题、就地编辑消息（§3.2）
  * - 输入框 + 整理按钮（§4.2）；附件：上传文件 / 拖入 / 项目文件（§3.1）
  */
 import React, { useEffect, useRef } from 'react';
-import { store, useStore } from '../store';
+import { store, useStore, LONG_TEXT_THRESHOLD } from '../store';
 import { confirmDialog } from './ui/dialog';
 import { MarkdownView } from './ui/MarkdownView';
 import { DiffView } from './ui/DiffView';
 import { CallInspectionDialog } from './ui/CallInspectionDialog';
 import type { ChatMessage, Attachment } from '../../shared/types';
+import { assetTypeLabel } from '../../shared/types';
 
 // --------------------------------------------------------------------------- 附件行
 
@@ -22,7 +23,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function AttachmentRow({ attachment }: { attachment: Attachment | undefined }): React.ReactElement | null {
+function AttachmentRow({ attachment, deletable }: { attachment: Attachment | undefined; deletable?: boolean }): React.ReactElement | null {
   const [open, setOpen] = React.useState(false);
   const [content, setContent] = React.useState<string | null>(null);
   if (!attachment) return null;
@@ -36,15 +37,30 @@ function AttachmentRow({ attachment }: { attachment: Attachment | undefined }): 
     }
   };
 
+  const remove = async (): Promise<void> => {
+    const ok = await confirmDialog({
+      title: `删除附件「${attachment.name}」？`,
+      message: '该附件将从项目中永久删除，所有会话的 AI 都无法再读取；引用它的历史消息中本行将隐藏。',
+      confirmText: '永久删除',
+      danger: true,
+    });
+    if (ok) void store.deleteAttachment(attachment.id).catch((err) => store.showToast((err as Error).message, 'error'));
+  };
+
   return (
     <div className="attachment-row">
-      <button className="attachment-row-main" onClick={() => void toggle()} title={open ? '收起全文' : '展开全文'}>
-        <span className="attachment-icon">📎</span>
-        <span className="attachment-name">{attachment.name}</span>
-        <span className="muted small"> · {formatSize(attachment.size)}</span>
-        {attachment.needsRestructure && <span className="badge badge-stale">已更新</span>}
-        <span className="muted small attachment-toggle">{open ? '▾' : '▸'}</span>
-      </button>
+      <div className="attachment-row-head">
+        <button className="attachment-row-main" onClick={() => void toggle()} title={open ? '收起全文' : '展开全文'}>
+          <span className="attachment-icon">📎</span>
+          <span className="attachment-name">{attachment.name}</span>
+          <span className="muted small"> · {formatSize(attachment.size)}</span>
+          {attachment.needsRestructure && <span className="badge badge-stale">已更新</span>}
+          <span className="muted small attachment-toggle">{open ? '▾' : '▸'}</span>
+        </button>
+        {deletable && (
+          <button className="tiny-btn attachment-delete" onClick={() => void remove()} title="删除附件（永久删除，不可恢复）">🗑</button>
+        )}
+      </div>
       {open && (
         <div className="attachment-body">
           <pre className="msg-content">{content ?? '加载中…'}</pre>
@@ -90,54 +106,21 @@ function ToolTraceView({ traces }: { traces: ChatMessage['toolTrace'] }): React.
   );
 }
 
-// --------------------------------------------------------------------------- 分支
+// --------------------------------------------------------------------------- 版本导航（DeepSeek 式 ◀ i/N ▶）
 
-function BranchPopover({ message, siblings, onClose }: {
-  message: ChatMessage;
-  siblings: ChatMessage[];
-  onClose: () => void;
-}): React.ReactElement {
-  const activeMessageId = useStore((s) => s.project?.activeMessageId);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onDocClick = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
-  }, [onClose]);
-
-  return (
-    <div className="branch-popover" ref={ref} onClick={(e) => e.stopPropagation()}>
-      {siblings.map((sib) => (
-        <button
-          key={sib.id}
-          className={`branch-popover-item${sib.id === activeMessageId ? ' active' : ''}`}
-          onClick={() => { void store.switchBranch(sib.id); onClose(); }}
-        >
-          <span className={`avatar ${sib.role === 'user' ? 'avatar-user' : 'avatar-ai'}`}>
-            {sib.role === 'user' ? '你' : 'AI'}
-          </span>
-          <span className="popover-preview">{sib.content.slice(0, 40) || '（空）'}</span>
-          {sib.supersededBy && <span className="badge">已取代</span>}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function BranchChip({ message }: { message: ChatMessage }): React.ReactElement | null {
+function VersionNav({ message }: { message: ChatMessage }): React.ReactElement | null {
   const project = useStore((s) => s.project);
-  const siblings = project?.messages.filter((m) => m.parentId === message.id) ?? [];
-  const [open, setOpen] = React.useState(false);
-  if (siblings.length <= 1) return null;
+  const count = message.versionCount ?? 1;
+  if (count <= 1 || !message.versionGroupId) return null;
+  const index = message.versionIndex ?? 1;
+  const versions = (project?.messages ?? []).filter((m) => m.versionGroupId === message.versionGroupId);
+  const prev = versions.find((v) => v.versionIndex === index - 1);
+  const next = versions.find((v) => v.versionIndex === index + 1);
   return (
-    <span className="branch-chip">
-      <button className="tiny-btn" onClick={() => setOpen(!open)} title="切换分支">
-        ↑↓ {siblings.length} 个分支
-      </button>
-      {open && <BranchPopover message={message} siblings={siblings} onClose={() => setOpen(false)} />}
+    <span className="version-nav" title="消息版本（编辑/重新生成产生）：◀/▶ 切换，切回旧版本会回到该版本的完整续写链">
+      <button className="tiny-btn" disabled={!prev} onClick={() => { if (prev) void store.switchBranch(prev.id); }} title="上一个版本">◀</button>
+      <span className="muted small version-nav-index">{index}/{count}</span>
+      <button className="tiny-btn" disabled={!next} onClick={() => { if (next) void store.switchBranch(next.id); }} title="下一个版本">▶</button>
     </span>
   );
 }
@@ -191,7 +174,7 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
       case 'node_deleted': return `删除节点：${c.nodeId}`;
       case 'node_renamed': return `重命名：${c.from} → ${c.to}`;
       case 'draft_updated': return `更新草稿：${c.nodeId}`;
-      case 'asset_created': return `新建设定：${c.title}（${c.type}）`;
+      case 'asset_created': return `新建设定：${c.title}（${assetTypeLabel(c.type)}）`;
       case 'asset_updated': return `更新设定：${c.assetId}`;
       default: return JSON.stringify(c);
     }
@@ -250,31 +233,28 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
 
 // --------------------------------------------------------------------------- 消息
 
-function MessageItem({ message, archivedView }: { message: ChatMessage; archivedView?: boolean }): React.ReactElement {
+function MessageItem({ message, archivedView }: { message: ChatMessage; archivedView?: boolean }): React.ReactElement | null {
   const project = useStore((s) => s.project);
+  const activePath = useStore((s) => s.activePath);
+  const running = useStore((s) => s.activeRun?.status === 'running');
   const attachment = message.refs?.attachmentIds
     ? project?.attachments.find((m) => message.refs!.attachmentIds!.includes(m.id))
     : undefined;
-  const activeMessageId = project?.activeMessageId;
   const [editing, setEditing] = React.useState(false);
   const [editText, setEditText] = React.useState('');
   const [showReasoning, setShowReasoning] = React.useState(false);
-  const [showOld, setShowOld] = React.useState(false);
   const [inspectOpen, setInspectOpen] = React.useState(false);
 
   if (message.role === 'system') {
-    // §4.3：运行开始/结束合并为一行轻提示（居中细条），变更明细不进对话正文
-    if (message.content.startsWith('运行开始（') || message.content.startsWith('运行结束（')) {
-      const firstLine = message.content.split('\n')[0];
-      return (
-        <div className="msg msg-run-strip">
-          <span className="muted small">{firstLine}</span>
-          {message.runId && (
-            <button className="tiny-btn" onClick={() => setInspectOpen(true)} title="调用详情（§4.7）">ⓘ</button>
-          )}
-          {inspectOpen && message.runId && <CallInspectionDialog runId={message.runId} onClose={() => setInspectOpen(false)} />}
-        </div>
-      );
+    // 用户反馈：运行开始/结束细条不再显示（日志保留，整理光标/压缩逻辑不受影响）；
+    // 运行状态由流式指示器覆盖，organize 结果由 AI 总结消息覆盖。
+    // 「消息已编辑」记账事件同样隐藏（旧版本经 ◀ ▶ 版本导航查看，日志保留原文）。
+    if (
+      message.content.startsWith('运行开始（') ||
+      message.content.startsWith('运行结束（') ||
+      message.content.startsWith('（消息已编辑）')
+    ) {
+      return null;
     }
     return (
       <div className="msg msg-system">
@@ -283,7 +263,9 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
     );
   }
 
-  const isActive = message.id === activeMessageId;
+  // DeepSeek 式：重新生成只出现在当前路径的最后一条 AI 回答下方，常驻可见
+  // （注意：run 结束后 activeMessageId 指向隐藏的运行结束事件，不能用它判断）
+  const isLastAi = message.role === 'ai' && activePath.filter((m) => m.role === 'ai').at(-1)?.id === message.id;
   const startEdit = (): void => {
     setEditText(message.content);
     setEditing(true);
@@ -295,7 +277,7 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
       return;
     }
     void store.editMessage(message.id, content)
-      .then(() => { setEditing(false); store.showToast('已重发（原消息与旧分支保留，活动路径从该点截断重走）', 'success'); })
+      .then(() => { setEditing(false); store.showToast('已重发为新版本（◀ ▶ 可切换回旧版本）', 'success'); })
       .catch((err) => store.showToast((err as Error).message, 'error'));
   };
   const copy = (): void => {
@@ -304,26 +286,6 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
       .catch(() => store.showToast('复制失败', 'error'));
   };
 
-  // 被取代的消息折叠为「查看上一版」（ux-review §4.1）
-  if (message.supersededBy) {
-    return (
-      <div className="msg msg-system">
-        <button className="tiny-btn" onClick={() => setShowOld(!showOld)}>
-          {showOld ? '收起' : `查看上一版（${message.role === 'user' ? '你' : 'AI'}）`}
-        </button>
-        {showOld && (
-          <div className="msg msg-superseded-old">
-            {message.role === 'user' ? (
-              <pre className="msg-content">{message.content}</pre>
-            ) : (
-              <MarkdownView text={message.content} />
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className={`msg msg-${message.role}`}>
       <div className="msg-head">
@@ -331,7 +293,7 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
           {message.role === 'user' ? '你' : 'AI'}
         </span>
         <span className="msg-role">{message.role === 'user' ? '你' : 'AI'}</span>
-        <BranchChip message={message} />
+        <VersionNav message={message} />
         <span className="msg-time">{new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
       {message.role === 'ai' && message.reasoning && (
@@ -356,44 +318,48 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
             }}
           />
           <div className="row">
-            <button className="tiny-btn" onClick={() => void saveEdit()}>保存 → 重发</button>
-            <button className="tiny-btn" onClick={() => setEditing(false)}>取消</button>
+            <button className="tiny-btn primary" onClick={() => void saveEdit()} title="发送（Enter）">发送</button>
+            <button className="tiny-btn" onClick={() => setEditing(false)} title="取消（Esc）">取消</button>
           </div>
         </div>
       ) : message.role === 'user' ? (
         // 附件消息（§3.1）：日志只存引用，正文以附件行呈现，不重复展示占位文本
         attachment ? (
-          <AttachmentRow attachment={attachment} />
+          <AttachmentRow attachment={attachment} deletable />
         ) : (
           <pre className="msg-content">{message.content}</pre>
         )
       ) : (
         <MarkdownView text={message.content} />
       )}
+      {/* DeepSeek 式：重新生成按钮常驻在最后一条 AI 回答下方（◀ ▶ 版本导航在头部） */}
+      {isLastAi && !archivedView && (
+        <div className="msg-regenerate">
+          <button
+            className="tiny-btn"
+            disabled={running}
+            onClick={() => void store.refreshMessage(message.id).catch((err) => store.showToast((err as Error).message, 'error'))}
+            title={running ? '运行中，请等待完成或取消后再重新生成' : '重新生成（生成新版本，◀ ▶ 可切换回旧回答）'}
+          >
+            ⟳ 重新生成
+          </button>
+        </div>
+      )}
       <div className="msg-actions">
         {message.role === 'ai' && (
           <>
             <button className="tiny-btn" onClick={() => void copy()} title="复制">⧉ 复制</button>
-            {isActive && !archivedView && (
-              <button className="tiny-btn" onClick={() => void store.refreshMessage(message.id)} title="重新生成，旧回复保留为分支">
-                ⟳ 重新生成
-              </button>
-            )}
-            {!archivedView && (
-              <button className="tiny-btn" onClick={startEdit} title="就地编辑重发（非弹窗）">✎ 编辑</button>
-            )}
             {message.runId && (
               <button className="tiny-btn" onClick={() => setInspectOpen(true)} title="调用详情（§4.7）">ⓘ 调用详情</button>
             )}
             <ToolTraceView traces={message.toolTrace} />
-            {message.runId && <OrganizeChangesExpand runId={message.runId} />}
           </>
         )}
         {message.role === 'user' && (
           <>
             <button className="tiny-btn" onClick={() => void copy()} title="复制">⧉ 复制</button>
             {!archivedView && (
-              <button className="tiny-btn" onClick={startEdit} title="就地编辑重发（原消息保留为分支）">✎ 编辑</button>
+              <button className="tiny-btn" onClick={startEdit} title="就地编辑为新版本（◀ ▶ 可切换）">✎ 编辑</button>
             )}
           </>
         )}
@@ -491,7 +457,9 @@ function StreamingIndicator(): React.ReactElement | null {
         <span className="muted small">
           {activeRun.kind === 'organize'
             ? `正在整理…${progress}`
-            : reasoningActive ? '深度思考中…' : '正在生成…'}
+            : activeRun.searching
+              ? '正在联网搜索…'
+              : reasoningActive ? '深度思考中…' : '正在生成…'}
           {elapsed > 0 && `（已等待 ${elapsed}s）`}
         </span>
         {reasoningActive && (
@@ -521,8 +489,23 @@ function StreamingIndicator(): React.ReactElement | null {
 
 // --------------------------------------------------------------------------- 输入栏
 
-/** 长文本自动识别为附件的阈值（≈2000 字，§3.2）。 */
-const LONG_TEXT_THRESHOLD = 2000;
+/** 待发送附件 chip 行（Part 3，ChatGPT/DeepSeek 式：上传先显示在输入框上方，发送时才进对话）。 */
+function PendingAttachmentRow(): React.ReactElement | null {
+  const pending = useStore((s) => s.pendingAttachments);
+  if (pending.length === 0) return null;
+  return (
+    <div className="pending-attachments">
+      {pending.map((a) => (
+        <span key={a.key} className="pending-chip" title={a.content.slice(0, 200)}>
+          <span className="attachment-icon">📎</span>
+          <span className="pending-chip-name">{a.name}</span>
+          <span className="muted small"> · {formatSize(a.size)}</span>
+          <button className="tiny-btn pending-chip-remove" onClick={() => store.removePendingAttachment(a.key)} title="移除（未发送，直接丢弃）">×</button>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function AttachmentPicker({ onClose }: { onClose: () => void }): React.ReactElement {
   const [projectFiles, setProjectFiles] = React.useState<Array<{ name: string; size: number }> | null>(null);
@@ -544,8 +527,8 @@ function AttachmentPicker({ onClose }: { onClose: () => void }): React.ReactElem
 
   const addProjectFile = async (name: string): Promise<void> => {
     try {
-      await store.importWorkspaceFiles([name]);
-      store.showToast(`已添加项目文件「${name}」为附件（原文件保留）`, 'success');
+      await store.stageWorkspaceFile(name);
+      store.showToast(`已加入待发送区「${name}」（原文件保留，发送时落盘）`, 'success');
       onClose();
     } catch (err) {
       store.showToast((err as Error).message, 'error');
@@ -554,7 +537,17 @@ function AttachmentPicker({ onClose }: { onClose: () => void }): React.ReactElem
 
   return (
     <div className="attachment-picker" ref={ref} onClick={(e) => e.stopPropagation()}>
-      <button className="small-btn" onClick={() => void store.pickFiles().catch((err) => store.showToast((err as Error).message, 'error'))}>
+      <button
+        className="small-btn"
+        onClick={() => void store.pickFiles()
+          .then((n) => {
+            if (n > 0) {
+              store.showToast(`已加入待发送区 ${n} 个附件（发送时落盘进对话）`, 'success');
+              onClose();
+            }
+          })
+          .catch((err) => store.showToast((err as Error).message, 'error'))}
+      >
         选择文件…
       </button>
       <div className="attachment-picker-group">
@@ -586,6 +579,7 @@ function InputBar(): React.ReactElement {
   });
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const pendingCount = useStore((s) => s.pendingAttachments.length);
   const longText = inputText.length >= LONG_TEXT_THRESHOLD;
   const settings = project?.settings;
 
@@ -602,15 +596,11 @@ function InputBar(): React.ReactElement {
   const tokenPct = Math.min(100, Math.round((chars / 1.5 / 30000) * 100));
 
   const send = (): void => {
-    const text = inputText.trim();
-    if (!text || running) return;
-    if (text.length >= LONG_TEXT_THRESHOLD) {
-      // §3.2：长文本自动识别为附件消息（日志存引用，正文可展开）
-      const name = text.split('\n')[0].slice(0, 30) || '粘贴文本.md';
-      void store.sendAttachmentAndRun(name, text).catch((err) => store.showToast((err as Error).message, 'error'));
-    } else {
-      void store.sendAndRun(text).catch((err) => store.showToast((err as Error).message, 'error'));
-    }
+    if (running) return;
+    if (inputText.trim() === '' && store.getState().pendingAttachments.length === 0) return;
+    // Part 3（ChatGPT/DeepSeek 式）：文本 + 待发送附件一次提交；
+    // 长文本（≥2000 字）自动转为 pasted 附件，逻辑在 store.sendWithPending
+    void store.sendWithPending(inputText).catch((err) => store.showToast((err as Error).message, 'error'));
   };
 
   if (archivedView) {
@@ -626,8 +616,8 @@ function InputBar(): React.ReactElement {
 
   return (
     <div className="input-bar">
-      {/* §4.1：模型/思考切换移到输入框上方（当前埋在设置页） */}
-      <div className="input-model-bar">
+      {/* §4.1：模型/思考切换 + 附件/整理 合并为一行工具栏（用户反馈：不要两行） */}
+      <div className="input-tools">
         <select
           className="model-select"
           value={settings?.model ?? 'deepseek-v4-flash'}
@@ -645,19 +635,16 @@ function InputBar(): React.ReactElement {
           />
           思考
         </label>
-        <span className="spacer" />
         <span className={`muted small token-meter${tokenPct >= 85 ? ' token-meter-warn' : ''}`} title="已使用上下文估算进度">
           已使用 {tokenPct}%
         </span>
-      </div>
-      <div className="input-tools">
+        <span className="spacer" />
         <span className="attachment-btn-wrap">
           <button className="small-btn" onClick={() => setPickerOpen(!pickerOpen)} title="上传文件或添加项目文件为附件（§3.1）">
             📎 附件
           </button>
           {pickerOpen && <AttachmentPicker onClose={() => setPickerOpen(false)} />}
         </span>
-        <span className="spacer" />
         {!running && (
           <button
             className="small-btn organize-btn"
@@ -668,11 +655,12 @@ function InputBar(): React.ReactElement {
           </button>
         )}
       </div>
+      <PendingAttachmentRow />
       <div className="input-row">
         <textarea
           ref={taRef}
           data-testid="chat-input"
-          placeholder={'讨论情节、设定、灵感…（Enter 发送，Shift+Enter 换行）'}
+          placeholder={pendingCount > 0 ? `发送时一并提交 ${pendingCount} 个附件…（Enter 发送，Shift+Enter 换行）` : '讨论情节、设定、灵感…（Enter 发送，Shift+Enter 换行）'}
           value={inputText}
           onChange={(e) => store.setInputText(e.target.value)}
           onKeyDown={(e) => {
@@ -686,7 +674,7 @@ function InputBar(): React.ReactElement {
           {running ? (
             <button className="small-btn" onClick={() => void store.cancelRun()}>取消</button>
           ) : (
-            <button data-testid="chat-send" className="primary" onClick={send} disabled={!inputText.trim()}>
+            <button data-testid="chat-send" className="primary" onClick={send} disabled={!inputText.trim() && pendingCount === 0}>
               发送
             </button>
           )}
@@ -763,6 +751,37 @@ function OrganizeDetailPanel({ onClose }: { onClose: () => void }): React.ReactE
   );
 }
 
+// --------------------------------------------------------------------------- 整理结果卡片（Part 4：organize 沙箱化后不落日志，瞬态展示）
+
+function OrganizeResultCard(): React.ReactElement | null {
+  const lastOrganize = useStore((s) => s.lastOrganize);
+  const [answerOpen, setAnswerOpen] = React.useState(false);
+  if (!lastOrganize) return null;
+  const answer = lastOrganize.finalAnswer;
+  const preview = answer.length > 2000 ? `${answer.slice(0, 2000)}…` : answer;
+  return (
+    <div className="organize-result-card">
+      <div className="organize-result-head">
+        <span className="badge">整理完成</span>
+        <span className="muted small">结果已写入大纲/设定；整理过程未进入讨论上下文</span>
+        <span className="spacer" />
+        <button className="tiny-btn" onClick={() => store.dismissOrganize()} title="收起（run 记录仍可通过调用详情查看）">收起</button>
+      </div>
+      {answer && (
+        <button className="tiny-btn" onClick={() => setAnswerOpen(!answerOpen)} title="最终总结（范围/产出清单/待定缺口）">
+          {answerOpen ? '收起总结' : '查看整理总结'}
+        </button>
+      )}
+      {answerOpen && (
+        <div className="organize-result-answer">
+          <MarkdownView text={preview} />
+        </div>
+      )}
+      <OrganizeChangesExpand runId={lastOrganize.runId} />
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- 面板
 
 export function ConversationPane(): React.ReactElement {
@@ -782,6 +801,8 @@ export function ConversationPane(): React.ReactElement {
   const messagesRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
+  // 用户反馈：当前话题为空（无消息）时不允许开启新话题
+  const emptyTopic = activeSession ? path.length === 0 : true;
 
   // 智能滚动（ux-review §4.1）：用户在历史中回看时不强制滚底；出现「跳到底部」浮标
   useEffect(() => {
@@ -806,7 +827,7 @@ export function ConversationPane(): React.ReactElement {
     bottomRef.current?.scrollIntoView?.({ behavior: 'smooth' });
   };
 
-  /** 拖入文件 → 附件消息（§3.1：内容落 attachments/，日志存引用）。 */
+  /** 拖入文件 → 待发送区（Part 3：先暂存输入框上方，发送时才落盘进对话）。 */
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragOver(false);
@@ -815,10 +836,10 @@ export function ConversationPane(): React.ReactElement {
     for (const file of files) {
       void file
         .text()
-        .then((text) => store.addAttachment(file.name, text, 'uploaded'))
+        .then((text) => store.stageAttachment(file.name, text, 'uploaded'))
         .catch((err) => store.showToast((err as Error).message, 'error'));
     }
-    store.showToast(`已添加 ${files.length} 个附件`, 'success');
+    store.showToast(`已加入待发送区 ${files.length} 个附件（发送时落盘进对话）`, 'success');
   };
 
   return (
@@ -848,13 +869,15 @@ export function ConversationPane(): React.ReactElement {
         )}
         <button
           className="tiny-btn"
+          disabled={emptyTopic}
           onClick={() => void store.newTopic().catch((err) => store.showToast((err as Error).message, 'error'))}
-          title="开启新话题：新建一条对话，当前话题保持活跃可随时切回（ux-review §4.5）"
+          title={emptyTopic ? '当前话题为空：先发送第一条消息后再开启新话题' : '开启新话题：新建一条对话，当前话题保持活跃可随时切回（ux-review §4.5）'}
         >
           ＋ 开启新话题
         </button>
       </div>
       <div className="conversation-subbar">
+        <OrganizeResultCard />
         {project && store.getState().unorganizedCount > 0 && (
           <button className="organize-hint" onClick={() => setOrganizeOpen(!organizeOpen)}>
             有新内容未整理 · {organizeOpen ? '收起' : '查看'}

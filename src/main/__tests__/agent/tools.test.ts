@@ -102,6 +102,36 @@ describe('工具 — 设定与材料', () => {
     const read = await exec(runtime, ctx, 'read_attachment', { attachmentId: m.id });
     expect((read.data as { content: string }).content).toBe('超长正文');
   });
+
+  it('附件范围（Part 2 默认会话内读取）：list_attachments 只列范围内；read_attachment 越界拒绝', async () => {
+    const { runtime } = makeCtx();
+    const inScope = runtime.workspace.attachments.createAttachment('本会话附件', 'A', 'pasted');
+    const outOfScope = runtime.workspace.attachments.createAttachment('别的会话附件', 'B', 'pasted');
+    const scopedCtx: ToolContext = { ...makeCtx().ctx, attachmentScope: new Set([inScope.id]) };
+
+    const list = await exec(runtime, scopedCtx, 'list_attachments', {});
+    const ids = (list.data as { attachments: Array<{ id: string }> }).attachments.map((a) => a.id);
+    expect(ids).toEqual([inScope.id]);
+
+    const okRead = await exec(runtime, scopedCtx, 'read_attachment', { attachmentId: inScope.id });
+    expect(okRead.ok).toBe(true);
+    const blockedRead = await exec(runtime, scopedCtx, 'read_attachment', { attachmentId: outOfScope.id });
+    expect(blockedRead.ok).toBe(false);
+    expect((blockedRead.error as { code: string }).code).toBe('ATTACHMENT_OUT_OF_SCOPE');
+  });
+
+  it('跨会话工具：list_all_attachments / read_any_attachment 不受范围限制', async () => {
+    const { runtime } = makeCtx();
+    const a = runtime.workspace.attachments.createAttachment('甲', '内容甲', 'pasted');
+    const b = runtime.workspace.attachments.createAttachment('乙', '内容乙', 'pasted');
+    const scopedCtx: ToolContext = { ...makeCtx().ctx, attachmentScope: new Set([a.id]) };
+
+    const list = await exec(runtime, scopedCtx, 'list_all_attachments', {});
+    const ids = (list.data as { attachments: Array<{ id: string }> }).attachments.map((x) => x.id).sort();
+    expect(ids).toEqual([a.id, b.id].sort());
+    const read = await exec(runtime, scopedCtx, 'read_any_attachment', { attachmentId: b.id });
+    expect((read.data as { content: string }).content).toBe('内容乙');
+  });
 });
 
 describe('工具 — organize 写入（含变更记录与写锁）', () => {

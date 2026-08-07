@@ -36,6 +36,52 @@ export const DISCLOSURE_MARKER_RULES = [
   '并在最终回答中逐条列明建议的标记，供作者审阅后决定保留或删除。',
 ].join('\n');
 
+/**
+ * 附件读取硬规则（Part 5）：作者发送带（附件：…）的消息时，正文已内联在
+ * 消息里；提示「过大未内联」的必须先用 read_attachment 读取完整正文再回答，
+ * 未读取不得作答。防止模型跳过附件直接产生幻觉回答。
+ */
+export const ATTACHMENT_READ_RULE = [
+  '消息中的（附件：…）正文已直接内联在消息文本里，直接使用即可，无需再调用读取工具；',
+  '若附件行提示「过大未内联」，必须先用 read_attachment 读取该附件的完整正文再回答，未读取不得作答；',
+  '附件行提示「附件已被删除」时，按缺失内容处理，不得猜测或编造附件内容。',
+].join('\n');
+
+/**
+ * 全部写入工具名（硬门禁用，§8.2/Part 4）：organize 任务结束时若未调用过
+ * 任何一个，即判定任务未执行（ORGANIZE_NO_WRITE_TOOL），不推进整理光标。
+ */
+export const WRITE_TOOL_NAMES = new Set([
+  'write_draft',
+  'create_node',
+  'rename_node',
+  'delete_node',
+  'write_asset',
+  'write_output',
+]);
+
+/**
+ * 文风规则（硬规则）：不输出 emoji/表情符号。
+ * 依据：模型默认在中文对话/创作语境下大量使用 emoji 点缀语气，
+ * 阅读体验差且污染落盘内容（正文/草稿/设定）。与 opencode 自身约定一致。
+ */
+export const NO_EMOJI_RULE = [
+  '文风：自然的中文书面表达，不用 emoji/表情符号，不用「~」「～」等语气装饰符。',
+  '需要强调时用文字本身表达，不用图形符号替代。',
+].join('\n');
+
+/**
+ * 联网搜索规则（web_search，仅 chat）：讨论中可以查实时信息。
+ * 搜索由服务端自动执行，结果直接注入上下文；回答基于搜索结果并注明来源，
+ * 不得把搜索结果冒充为作品设定。
+ */
+export const WEB_SEARCH_RULE = [
+  '你可以联网搜索实时信息（web_search）：作者问及需要时效性的事实（最新新闻、真实事件、',
+  '现实中的日期/人物/数据）或信息不确定时，主动搜索后回答；搜索结果由服务端自动注入。',
+  '搜索是创作辅助，不是作品事实来源：搜索结果用于参考与事实核查，不得直接写入作品设定；',
+  '正文/设定中的虚构内容一律以讨论与材料为准。',
+].join('\n');
+
 export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
   chat: {
     kind: 'chat',
@@ -43,7 +89,12 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       '你是「故事工坊」的全局讨论助手。当前项目只有一条持续对话，你和作者在这里自由讨论情节、设定与灵感。',
       '你可以检索大纲、草稿、设定、附件与可见视图，但没有任何写入工具：',
       '普通讨论是只读的，不得创建或修改任何内容。',
+      WEB_SEARCH_RULE,
+      '附件读取规则（默认会话内读取）：list_attachments / read_attachment 只能看到当前会话消息中引用的附件。',
+      '作者明确要求查看其他会话或项目里的附件时，才允许用 list_all_attachments / read_any_attachment 跨会话读取；不得主动跨会话检索。',
+      ATTACHMENT_READ_RULE,
       '作者有需要落实为结构的内容时，会自己点击「整理」按钮启动整理任务——那不是你的职责。',
+      NO_EMOJI_RULE,
     ].join('\n'),
     whitelist: [
       'search_nodes',
@@ -55,22 +106,33 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       'list_assets',
       'list_attachments',
       'read_attachment',
+      'list_all_attachments',
+      'read_any_attachment',
       'read_visible_view',
+      'web_search',
     ],
   },
 
   organize: {
     kind: 'organize',
     systemPrompt: [
-      '你是整理任务：把范围内的讨论/附件内容消化为作品结构。',
+      '这是整理任务，不是讨论。你必须在本次运行内通过写入工具把范围内的内容落实为作品结构。',
+      '执行方式：用只读工具（大纲/草稿/设定/附件检索）充分读取范围内材料后，调用写入工具落盘——',
+      'create_node（新建大纲节点）、write_draft（写草稿）、write_asset（写设定）、rename_node / delete_node（调整结构）。',
+      '硬性规则：不调用任何写入工具、只输出分析文字 = 任务未执行，本次运行将被判定失败且不会推进整理进度。',
       '目标由你自己判断：范围内的内容在作品里是什么——够情节的落大纲草稿，够独立的落设定，混合产出，什么都不够就列缺口报告。',
       '产出规则（硬规则，同时约束大纲与设定）：',
       NO_COMPOSITION_RULE,
       '披露规则（§6.2）：',
       DISCLOSURE_MARKER_RULES,
       '范围由用户显式指定（下方「本次范围」）。只处理范围内的内容。',
-      '任务结束时，在最终回答里向作者总结（自然语言，一两段即可）：本次整理的范围、产出清单',
+      '附件读取规则（默认范围读取）：list_attachments / read_attachment 只能看到范围内消息引用的附件。',
+      '作者明确要求把其他附件也纳入整理（如「把全部附件也整理进去」）时，才允许用 list_all_attachments / read_any_attachment 跨会话读取；不得主动跨会话检索。',
+      ATTACHMENT_READ_RULE,
+      '最终回答只允许简短总结（一两段即可，禁止复述、扩展或发散材料内容）：本次整理的范围、产出清单',
       '（逐条列出新建/更新的节点与设定名称）、待定的缺口（信息不足未能落定的部分）。',
+      '写作完成前不要输出最终总结；所有落盘动作必须先通过写入工具完成。',
+      NO_EMOJI_RULE,
     ].join('\n'),
     whitelist: [
       'search_nodes',
@@ -82,6 +144,8 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       'list_assets',
       'list_attachments',
       'read_attachment',
+      'list_all_attachments',
+      'read_any_attachment',
       'read_visible_view',
       'write_draft',
       'create_node',
@@ -98,6 +162,7 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       '你物理上读不到细纲、大纲树、设定、附件或任何其他场景内容——不要尝试。',
       '按模板的格式指南，把可见视图扩写为完整正文。',
       '产出通过 write_output 落盘为 outputs/<sceneId>.<format>.md。',
+      NO_EMOJI_RULE,
     ].join('\n'),
     whitelist: ['read_visible_view', 'read_format_template', 'write_output'],
   },
@@ -113,6 +178,7 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       '替换将由本地代码直接落盘：newContent = 选中区间前的原文 + 你的回答 + 选中区间后的原文。',
       '因此：不得改写选中区间之外的任何文字，不得擅自重写全文，不得输出「修改意见」这类非文本内容。',
       '若信息不足无法完成（如角色设定与选中区间冲突且无法判断），返回单行说明并以「【无法改写】」开头。',
+      NO_EMOJI_RULE,
     ].join('\n'),
     whitelist: ['read_visible_view', 'read_asset', 'list_assets', 'read_output'],
   },

@@ -72,6 +72,15 @@ export interface ChatMessage {
   supersedesId?: string;
   /** 被刷新/编辑取代（读取时派生：supersedesId === id 的消息 id） */
   supersededBy?: string;
+  /**
+   * 版本组根 id（读取时派生，DeepSeek 式 ◀ i/N ▶ 导航）：沿 supersedesId
+   * 链回溯到根；普通消息（无取代关系）= 自身 id。
+   */
+  versionGroupId?: string;
+  /** 版本序号（读取时派生：版本组内按日志顺序 1 起编号） */
+  versionIndex?: number;
+  /** 版本总数（读取时派生：同 versionGroupId 的消息数） */
+  versionCount?: number;
   role: 'user' | 'ai' | 'system';
   content: string;
   timestamp: string;
@@ -99,6 +108,12 @@ export interface ChatMessage {
 export interface ConversationSession {
   id: string;
   title: string;
+  /**
+   * 标题是否为占位/自动生成（createSession 的「话题 N」或首条消息启发式）：
+   * true 时在首个对话 run 完成后由 AI 自动命名（ChatGPT/DeepSeek 式），
+   * 成功后置 false；失败保留占位、下次 run 重试。
+   */
+  titleAuto?: boolean;
   /** 会话首条消息 id（懒记录：首条消息落盘时写入） */
   rootMessageId?: string;
   /**
@@ -143,6 +158,22 @@ export interface Asset {
   hash: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 设定类型的 UI 中文文案（内部存储保持英文枚举，仅展示层汉化）。 */
+export const ASSET_TYPE_LABELS: Record<string, string> = {
+  character: '角色',
+  worldbuilding: '世界观',
+  timeline: '编年史',
+  location: '地点',
+  prop: '道具',
+  foreshadow: '伏笔',
+  misc: '杂项',
+};
+
+/** 设定类型 → 中文标签；未知类型（自定义）原样返回。 */
+export function assetTypeLabel(type: string): string {
+  return ASSET_TYPE_LABELS[type] ?? type;
 }
 
 export interface ConversationMeta {

@@ -11,6 +11,7 @@ import { makeAttachmentReadTools } from './tools/attachment-tools';
 import { makeConversationReadTools } from './tools/conversation-tools';
 import { makeWriteTools } from './tools/write-tools';
 import { makeDetailTools } from './tools/detail-tools';
+import { makeWebSearchTool } from './tools/websearch-tool';
 import { FormatTemplateRepository } from './templates';
 import type { ModelAdapter } from './model-types';
 import type { ProjectWorkspace } from '../storage/workspace';
@@ -34,6 +35,7 @@ export function createAgentRuntime(
   registry.registerAll(makeConversationReadTools(projectDir));
   registry.registerAll(makeWriteTools(projectDir));
   registry.registerAll(makeDetailTools(projectDir, options?.templates));
+  registry.registerAll([makeWebSearchTool()]);
 
   const coordinator = new RunCoordinator({ model, workspace, registry });
   return { workspace, registry, coordinator };

@@ -214,12 +214,17 @@ export async function runCompressionTask(
   return { ok: false, blocked: true, error: '压缩任务连续失败（原始对话没有丢失）' };
 }
 
-/** 组装进模型输入的摘要消息（role=system，携带锚点 id 供追溯）。 */
-export function summaryMessage(anchor: string, summary: string): ChatMessage {
+/**
+ * 组装进模型输入的摘要消息（role=system，携带锚点 id 供追溯）。
+ * refs 透传被压缩前缀消息引用的附件 id——保证附件范围（默认会话内读取）
+ * 在压缩后不丢失：摘要消息的 refs 使被压缩掉的附件仍在本轮可见范围内。
+ */
+export function summaryMessage(anchor: string, summary: string, refs?: { attachmentIds?: string[] }): ChatMessage {
   return {
     id: `summary-${anchor}`,
     role: 'system',
     content: `【已压缩的较早讨论摘要（锚点 #${anchor}）】\n${summary}`,
     timestamp: new Date().toISOString(),
+    ...(refs?.attachmentIds && refs.attachmentIds.length > 0 ? { refs } : {}),
   };
 }

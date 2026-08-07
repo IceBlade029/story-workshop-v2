@@ -41,7 +41,7 @@ function makeApi(): RendererApi {
   const project = makeProject();
   return {
     app: { getVersion: vi.fn(async () => '0.1.0') },
-    project: { list: vi.fn(async () => []), create: vi.fn(async () => project), open: vi.fn(async () => project), pickFolder: vi.fn(async () => null) },
+    project: { list: vi.fn(async () => []), create: vi.fn(async () => project), open: vi.fn(async () => project), pickFolder: vi.fn(async () => null), delete: vi.fn(async () => {}) },
     state: { get: vi.fn(async () => project) },
     outline: {
       createNode: vi.fn(async () => project),
@@ -55,8 +55,11 @@ function makeApi(): RendererApi {
     },
     asset: { create: vi.fn(async () => project), update: vi.fn(async () => project), delete: vi.fn(async () => project) },
     attachment: {
-      add: vi.fn(async () => project), addFiles: vi.fn(async () => project), pickFiles: vi.fn(async () => project),
-      scanWorkspace: vi.fn(async () => []), importWorkspace: vi.fn(async () => project), readContent: vi.fn(async () => ({ name: 'x', content: 'x' })),
+      pickFiles: vi.fn(async () => [{ name: 'x.md', content: 'x' }]),
+      scanWorkspace: vi.fn(async () => []),
+      readWorkspace: vi.fn(async () => ({ name: 'x.md', content: 'x' })),
+      readContent: vi.fn(async () => ({ name: 'x', content: 'x' })),
+      delete: vi.fn(async () => project),
     },
     visibleView: { read: vi.fn(async () => null), generate: vi.fn(async () => project), save: vi.fn(async () => project) },
     output: {
@@ -64,7 +67,7 @@ function makeApi(): RendererApi {
       applyRevise: vi.fn(async () => project), undoRevise: vi.fn(async () => project),
     },
     conversation: {
-      send: vi.fn(async () => project), newTopic: vi.fn(async () => project),
+      send: vi.fn(async () => project), sendWithAttachments: vi.fn(async () => project), newTopic: vi.fn(async () => project),
       switchSession: vi.fn(async () => project), archiveSession: vi.fn(async () => project),
       unarchiveSession: vi.fn(async () => project), deleteSession: vi.fn(async () => project),
       switchBranch: vi.fn(async () => project), edit: vi.fn(async () => project),
@@ -90,7 +93,7 @@ describe('Workspace — 保存草稿按钮（回归：点击没反应）', () =>
 
   afterEach(() => cleanup());
 
-  it('点击「保存草稿」触发 outline.writeDraft（含节点 id 与草稿内容）并显示成功反馈', async () => {
+  it('草稿未改动时「保存草稿」禁用；改动后亮起，点击触发 writeDraft 并保存后再次变灰（用户反馈）', async () => {
     const api = makeApi();
     const writeDraft = vi.fn(async () => makeProject());
     setApiForTest({ ...api, outline: { ...api.outline, writeDraft } });
@@ -107,14 +110,24 @@ describe('Workspace — 保存草稿按钮（回归：点击没反应）', () =>
     const editor = screen.getByTestId('draft-editor') as HTMLTextAreaElement;
     expect(editor.value).toBe('旧草稿');
 
-    // 点击保存草稿 → 触发 writeDraft + 成功反馈
+    // 未改动 → 保存按钮灰色不可交互
+    const saveBtn = screen.getByText('保存草稿') as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(true);
+
+    // 改动内容 → 按钮亮起
+    fireEvent.change(editor, { target: { value: '旧草稿\n\n新增内容' } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(saveBtn.disabled).toBe(false);
+
+    // 点击保存草稿 → 触发 writeDraft + 成功反馈 + 按钮重新变灰
     await act(async () => {
-      fireEvent.click(screen.getByText('保存草稿'));
+      fireEvent.click(saveBtn);
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(writeDraft).toHaveBeenCalledTimes(1);
-    expect(writeDraft).toHaveBeenCalledWith('c1', '旧草稿');
+    expect(writeDraft).toHaveBeenCalledWith('c1', '旧草稿\n\n新增内容');
     expect(store.getState().toast?.message).toBe('草稿已保存');
+    expect(saveBtn.disabled).toBe(true);
   });
 
   it('保存失败时显示错误反馈（不再静默无反应）', async () => {
@@ -125,12 +138,44 @@ describe('Workspace — 保存草稿按钮（回归：点击没反应）', () =>
     store.selectNode('c1');
     render(<Workspace />);
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // 改动内容后再保存（未改动时按钮禁用）
+    await act(async () => {
+      fireEvent.click(screen.getByText('编辑'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const editor = screen.getByTestId('draft-editor') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: '改过的内容' } });
     await act(async () => {
       fireEvent.click(screen.getByText('保存草稿'));
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(store.getState().toast?.kind).toBe('error');
     expect(store.getState().toast?.message).toContain('WRITE_FAILED');
+  });
+
+  it('「提交为正式版（含子树）」位于草稿底部与保存草稿同排；正式版 tab 只读无保存按钮（用户反馈 6/7）', async () => {
+    const api = makeApi();
+    await store.openProject('/proj');
+    store.selectNode('c1');
+    render(<Workspace />);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // 草稿 tab：保存草稿 + 提交为正式版 同一行（draft-actions）
+    const row = document.querySelector('.draft-actions');
+    const labels = row ? Array.from(row.querySelectorAll('button')).map((b) => b.textContent) : [];
+    expect(labels).toEqual(['保存草稿', '提交为正式版（含子树）']);
+    // 顶部操作行不再有提交按钮
+    const headRow = document.querySelector('.ws-head + .row');
+    expect(headRow?.textContent).not.toContain('提交为正式版');
+
+    // 正式版 tab：只读展示，无「保存正式版」按钮、无编辑器 textarea
+    await act(async () => {
+      fireEvent.click(screen.getByText('正式版'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryByText('保存正式版')).toBeNull();
+    expect(screen.queryByTestId('official-editor')).toBeNull();
+    expect(screen.getByText(/正式版由「提交为正式版/)).toBeTruthy();
   });
 
   it('默认预览模式：草稿 tab 显示渲染后的内容，编辑需手动切换', async () => {

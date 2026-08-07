@@ -17,6 +17,7 @@ import React, { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { store, useStore, type ModuleId } from './store';
 import { getApi } from './api';
+import { confirmDialog } from './components/ui/dialog';
 import { LeftPanel } from './components/LeftPanel';
 import { ConversationPane } from './components/ConversationPane';
 import { Workspace } from './components/Workspace';
@@ -60,6 +61,25 @@ function ProjectScreen(): React.ReactElement {
     }
   };
 
+  const remove = async (dir: string, projectName: string): Promise<void> => {
+    const ok = await confirmDialog({
+      title: `删除项目「${projectName}」？`,
+      message: '项目文件夹将移到系统回收站（可恢复）。若正在打开，会自动关闭并回到项目列表。',
+      confirmText: '移到回收站',
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await store.deleteProject(dir);
+      store.showToast('项目已移到系统回收站', 'success');
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="project-screen">
       <h1>故事工坊</h1>
@@ -83,10 +103,20 @@ function ProjectScreen(): React.ReactElement {
         <div className="project-list">
           <h3>最近项目</h3>
           {projects.map((p) => (
-            <button key={p.dir} className="project-item" onClick={() => void store.openProject(p.dir)}>
-              <span>{p.name}</span>
-              <span className="muted small">{new Date(p.createdAt).toLocaleString()}</span>
-            </button>
+            <div key={p.dir} className="project-item">
+              <button className="project-item-main" onClick={() => void store.openProject(p.dir)}>
+                <span>{p.name}</span>
+                <span className="muted small">{new Date(p.createdAt).toLocaleString()}</span>
+              </button>
+              <button
+                className="tiny-btn project-item-delete"
+                disabled={busy}
+                title="删除项目（移到系统回收站，可恢复）"
+                onClick={() => void remove(p.dir, p.name)}
+              >
+                🗑
+              </button>
+            </div>
           ))}
         </div>
       )}

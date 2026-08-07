@@ -181,4 +181,11 @@ describe('阶段 2 — 一次摘要任务（§7.3、§7.4）', () => {
     expect(m.content).toContain('#m10');
     expect(m.content).toContain('摘要正文');
   });
+
+  it('摘要消息透传被压缩前缀的附件引用（Part 2：压缩后附件仍在可见范围）', () => {
+    const m = summaryMessage('m10', '摘要正文', { attachmentIds: ['att_1', 'att_2'] });
+    expect(m.refs?.attachmentIds).toEqual(['att_1', 'att_2']);
+    const without = summaryMessage('m10', '摘要正文');
+    expect(without.refs).toBeUndefined();
+  });
 });

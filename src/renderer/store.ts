@@ -17,6 +17,24 @@ export type ModuleId = 'discussion' | 'writing';
 export type WorkspaceMode = 'node' | 'asset';
 export type ToastKind = 'info' | 'success' | 'error';
 
+/** 待发送附件（Part 3：上传先入输入框上方暂存区，发送时才落盘进对话）。 */
+export interface PendingAttachment {
+  key: string;
+  name: string;
+  content: string;
+  source: 'uploaded' | 'workspace' | 'pasted';
+  size: number;
+}
+
+let pendingKeySeq = 0;
+export function nextPendingKey(): string {
+  pendingKeySeq += 1;
+  return `pending-${Date.now()}-${pendingKeySeq}`;
+}
+
+/** 长文本自动识别为附件的阈值（≈2000 字，§3.2）。 */
+export const LONG_TEXT_THRESHOLD = 2000;
+
 /** 运行完成兜底（毫秒）：流式事件推送异常时主动刷新状态，绝不永远「思考中…」 */
 const RUN_COMPLETION_FALLBACK_MS = 60_000;
 export type RunKind = 'chat' | 'organize' | 'detail_fill' | 'revise';
@@ -35,6 +53,8 @@ export interface ActiveRun {
   chunks: string[];
   /** 思维链（DeepSeek V4 思考模式，流式增量累积） */
   reasoning: string[];
+  /** 服务端联网搜索状态（Responses API 原生 web_search） */
+  searching: boolean;
   traces: ToolCallTrace[];
   status: 'running' | 'done' | 'error';
   error?: string;
@@ -59,13 +79,19 @@ export interface AppState {
    */
   viewHistory: Array<{ kind: 'node' | 'asset'; id: string }>;
   inputText: string;
+  /** 待发送附件（Part 3：上传先暂存在输入框上方，发送时才落盘进对话） */
+  pendingAttachments: PendingAttachment[];
   activeRun: ActiveRun | null;
   lastRunId: string | null;
-  /**
-   * 最近一次写作任务（detail_fill / revise）的内部 runId（沙箱隔离后写作任务
+  /** 最近一次写作任务（detail_fill / revise）的内部 runId（沙箱隔离后写作任务
    * 在讨论中零痕迹；正文模块工具栏「ⓘ 调用详情」入口用，ux-review §4.7）。
    */
   lastWritingRunId: string | null;
+  /**
+   * 最近一次整理任务的瞬态结果（Part 4：organize 沙箱化后不写对话日志，
+   * 结果以子栏卡片展示；重启后消失，历史由调用详情记录兜底）。
+   */
+  lastOrganize: { runId: string; finalAnswer: string } | null;
   toast: { message: string; kind: ToastKind } | null;
   /** 大纲树展开状态（§3.1，切 tab 不丢） */
   expandedIds: Set<string>;
@@ -89,9 +115,11 @@ const initial: AppState = {
   workspaceMode: null,
   viewHistory: [],
   inputText: '',
+  pendingAttachments: [],
   activeRun: null,
   lastRunId: null,
   lastWritingRunId: null,
+  lastOrganize: null,
   toast: null,
   expandedIds: new Set(),
   treeSearch: '',
@@ -235,6 +263,31 @@ export const store = {
     if (dir) await this.openProject(dir);
   },
 
+  /**
+   * 删除项目（确认后移到系统回收站）：若删除的是当前打开项目 → 自动关闭并
+   * 回到项目列表；随后刷新列表。
+   */
+  async deleteProject(dir: string): Promise<void> {
+    const api = getApi();
+    await api.project.delete(dir);
+    const wasOpen = state.project?.dir === dir;
+    if (wasOpen) {
+      setState({
+        project: null,
+        activeRun: null,
+        lastRunId: null,
+        lastWritingRunId: null,
+        lastOrganize: null,
+        pendingAttachments: [],
+        inputText: '',
+        selected: null,
+        workspaceMode: null,
+        viewHistory: [],
+      });
+    }
+    await this.loadProjects();
+  },
+
   /** 任意操作后刷新项目状态（IPC 操作都返回新 state，直接使用）。 */
   adoptProject(project: ProjectState): void {
     setState({ project });
@@ -337,11 +390,24 @@ export const store = {
     await this.startRun('chat', { parentMessageId: project.activeMessageId });
   },
 
-  /** 长文本粘贴自动识别为附件（§3.2）：落为附件消息（日志存引用），随后启动 chat run。 */
-  async sendAttachmentAndRun(name: string, content: string): Promise<void> {
+  /**
+   * 发送「文本 + 待发送附件」（Part 3，ChatGPT 式）：附件发送时才落盘进对话。
+   * 长文本（≥ LONG_TEXT_THRESHOLD）自动转为 pasted 附件；空文本但有附件也可发送。
+   */
+  async sendWithPending(text: string): Promise<void> {
     const api = getApi();
-    setState({ inputText: '' });
-    const project = await api.attachment.add(name, content, 'pasted');
+    const trimmed = text.trim();
+    if (trimmed === '' && state.pendingAttachments.length === 0) return;
+    const attachments: Array<{ name: string; content: string; source: 'pasted' | 'uploaded' | 'workspace' }> =
+      state.pendingAttachments.map((a) => ({ name: a.name, content: a.content, source: a.source }));
+    let content = trimmed;
+    if (trimmed.length >= LONG_TEXT_THRESHOLD) {
+      const name = trimmed.split('\n')[0].slice(0, 30) || '粘贴文本.md';
+      attachments.push({ name, content: trimmed, source: 'pasted' });
+      content = '';
+    }
+    setState({ inputText: '', pendingAttachments: [] });
+    const project = await api.conversation.sendWithAttachments(content, attachments);
     setState({ project });
     await this.startRun('chat', { parentMessageId: project.activeMessageId });
   },
@@ -356,17 +422,18 @@ export const store = {
     const retry: RunRequestParams = kind === 'chat'
       ? { kind: 'chat', parentMessageId: req.parentMessageId }
       : { kind: 'organize', scope: req.scope ?? { type: 'unorganized' }, note: req.note };
-    withState((s) => ({ ...s, activeRun: { runId, kind, chunks: [], reasoning: [], traces: [], status: 'running', retry } }));
+    withState((s) => ({ ...s, activeRun: { runId, kind, chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry } }));
     scheduleRunFallback(runId);
   },
 
-  /** 刷新最后一条 AI 消息（重新生成，保留旧分支）。 */
+  /** 刷新最后一条 AI 消息（重新生成，生成新版本 ◀ ▶ 可切换）。 */
   async refreshMessage(messageId: string): Promise<void> {
     const api = getApi();
+    if (state.activeRun?.status === 'running') throw new Error('RUN_IN_PROGRESS: 运行中不能重新生成，请先等待完成或取消');
     const { runId } = await api.run.refresh(messageId);
     withState((s) => ({
       ...s,
-      activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], traces: [], status: 'running', retry: { kind: 'refresh', messageId } },
+      activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: { kind: 'refresh', messageId } },
     }));
     scheduleRunFallback(runId);
   },
@@ -378,7 +445,7 @@ export const store = {
     withState((s) => ({
       ...s,
       activeRun: {
-        runId, kind: 'detail_fill', chunks: [], reasoning: [], traces: [], status: 'running',
+        runId, kind: 'detail_fill', chunks: [], reasoning: [], searching: false, traces: [], status: 'running',
         retry: { kind: 'detail_fill', sceneId, format, feedback },
       },
     }));
@@ -392,7 +459,7 @@ export const store = {
     withState((s) => ({
       ...s,
       activeRun: {
-        runId, kind: 'revise', chunks: [], reasoning: [], traces: [], status: 'running',
+        runId, kind: 'revise', chunks: [], reasoning: [], searching: false, traces: [], status: 'running',
         retry: { kind: 'revise', sceneId, format, start, end, instruction },
       },
     }));
@@ -420,31 +487,31 @@ export const store = {
     switch (params.kind) {
       case 'chat': {
         const { runId } = await getApi().run.start({ kind: 'chat', parentMessageId: params.parentMessageId });
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
       case 'organize': {
         const { runId } = await getApi().run.start({ kind: 'organize', scope: params.scope ?? { type: 'unorganized' }, note: params.note });
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'organize', chunks: [], reasoning: [], traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, activeRun: { runId, kind: 'organize', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
       case 'detail_fill': {
         const { runId } = await getApi().run.detailFill(params.sceneId, params.format, params.feedback);
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'detail_fill', chunks: [], reasoning: [], traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, activeRun: { runId, kind: 'detail_fill', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
       case 'refresh': {
         const { runId } = await getApi().run.refresh(params.messageId);
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
       case 'revise': {
         const { runId } = await getApi().run.revise(params.sceneId, params.format, params.start, params.end, params.instruction);
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'revise', chunks: [], reasoning: [], traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, activeRun: { runId, kind: 'revise', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
@@ -466,11 +533,18 @@ export const store = {
     setState({ project });
   },
 
-  /** 编辑用户消息 → 分支（§3.2）。 */
+  /**
+   * 编辑用户消息 → 新版本（§3.2）。DeepSeek 式：编辑提交 = 重新发送，
+   * 提交后自动启动 chat run，让 AI 针对编辑后的消息重新回答。
+   */
   async editMessage(messageId: string, content: string): Promise<void> {
     const api = getApi();
+    if (state.activeRun?.status === 'running') throw new Error('RUN_IN_PROGRESS: 运行中不能编辑，请先等待完成或取消');
     const project = await api.conversation.edit(messageId, content);
     setState({ project });
+    // 找到取代消息（新版本）作为 run 父节点；编辑后的续写从它开始
+    const replacement = project.messages.find((m) => m.supersedesId === messageId);
+    await this.startRun('chat', { parentMessageId: replacement?.id ?? project.activeMessageId });
   },
 
   // ------------------------------------------------------------ 会话（ux-review §4.5，ChatGPT 式）
@@ -522,6 +596,11 @@ export const store = {
     const api = getApi();
     const project = await api.context.recompress(focus);
     setState({ project });
+  },
+
+  /** 收起整理结果卡片（Part 4：瞬态展示，收起即从界面移除，不影响 run 记录）。 */
+  dismissOrganize(): void {
+    setState({ lastOrganize: null });
   },
 
   // ------------------------------------------------------------ 版本历史（§5.5）
@@ -576,12 +655,22 @@ export const store = {
       case 'trace':
         withState((s) => ({ ...s, activeRun: { ...s.activeRun!, traces: [...s.activeRun!.traces, event.trace] } }));
         break;
+      case 'search':
+        withState((s) => ({ ...s, activeRun: { ...s.activeRun!, searching: event.status === 'searching' } }));
+        break;
       case 'done':
         // P0-1：取消且无回答 → 视为失败态（已产生文本保留为可复制失败块 + 重试）
         if (event.result.cancelled && !event.result.finalAnswer) {
           void this.finishRun(run.runId, '已取消', undefined, true);
         } else {
           void this.finishRun(run.runId, event.result.error ?? null, event.result.finalAnswer);
+        }
+        // Part 4：organize 沙箱化——成功后结果进瞬态卡片（不写对话日志）
+        if (run.kind === 'organize' && !event.result.error && !event.result.cancelled) {
+          withState((s) => ({
+            ...s,
+            lastOrganize: { runId: event.result.runId, finalAnswer: event.result.finalAnswer ?? '' },
+          }));
         }
         // 写作任务（沙箱隔离）：记录内部 runId，供正文模块「ⓘ 调用详情」入口（§4.7）
         if ((run.kind === 'detail_fill' || run.kind === 'revise') && event.result.runId) {
@@ -688,10 +777,19 @@ export const store = {
     setState({ project, selected: null, workspaceMode: null });
   },
 
-  async addAttachment(name: string, content: string, source: 'pasted' | 'uploaded' = 'pasted'): Promise<void> {
-    const api = getApi();
-    const project = await api.attachment.add(name, content, source);
-    setState({ project, inputText: '' });
+  /** 暂存附件到待发送区（Part 3：不落盘、不进对话；发送时一并提交）。 */
+  stageAttachment(name: string, content: string, source: 'uploaded' | 'workspace' | 'pasted'): void {
+    setState({
+      pendingAttachments: [
+        ...state.pendingAttachments,
+        { key: nextPendingKey(), name, content, source, size: new TextEncoder().encode(content).length },
+      ],
+    });
+  },
+
+  /** 从待发送区移除附件（未落盘，直接丢弃）。 */
+  removePendingAttachment(key: string): void {
+    setState({ pendingAttachments: state.pendingAttachments.filter((a) => a.key !== key) });
   },
 
   /** 读取附件完整正文（附件行展开用）。 */
@@ -700,11 +798,20 @@ export const store = {
     return api.attachment.readContent(attachmentId);
   },
 
-  /** 文件选择对话框 → 上传为附件（§3.1 'uploaded'）。 */
-  async pickFiles(): Promise<void> {
+  /** 删除附件（确认后永久删除）：移除索引与正文文件，历史引用行自动隐藏。 */
+  async deleteAttachment(attachmentId: string): Promise<void> {
     const api = getApi();
-    const project = await api.attachment.pickFiles();
-    if (project) setState({ project, inputText: '' });
+    const project = await api.attachment.delete(attachmentId);
+    setState({ project });
+  },
+
+  /** 文件选择对话框 → 预读并暂存到待发送区（§3.1 'uploaded'）；返回暂存数量。 */
+  async pickFiles(): Promise<number> {
+    const api = getApi();
+    const files = await api.attachment.pickFiles();
+    if (!files || files.length === 0) return 0;
+    for (const f of files) this.stageAttachment(f.name, f.content, 'uploaded');
+    return files.length;
   },
 
   /** 扫描项目文件夹顶层散落的文本文件（「项目文件」分组，§3.1）。 */
@@ -713,11 +820,12 @@ export const store = {
     return api.attachment.scanWorkspace();
   },
 
-  /** 把项目文件夹中的文件添加为附件（原文件不移动不删除，§3.1）。 */
-  async importWorkspaceFiles(names: string[]): Promise<void> {
+  /** 只读项目顶层文件并暂存到待发送区（Part 3；原文件不移动不删除）。 */
+  async stageWorkspaceFile(name: string): Promise<void> {
     const api = getApi();
-    const project = await api.attachment.importWorkspace(names);
-    setState({ project });
+    const read = await api.attachment.readWorkspace(name);
+    if (!read) return;
+    this.stageAttachment(read.name, read.content, 'workspace');
   },
 
   // ------------------------------------------------------------ 可见视图/正文（§6）

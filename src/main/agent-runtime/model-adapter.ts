@@ -29,12 +29,14 @@ import type {
  * - `text_delta`: incremental text content for final answers
  * - `reasoning_delta`: incremental thinking-chain content (DeepSeek V4)
  * - `tool_call_delta`: incremental tool call data, accumulated by index
+ * - `search_status`: server-side web search progress (Responses API)
  * - `done`: terminal chunk carrying finishReason and usage
  */
 export type ChatChunk =
   | { type: 'text_delta'; content: string }
   | { type: 'reasoning_delta'; content: string }
   | { type: 'tool_call_delta'; index: number; id?: string; name?: string; arguments?: string }
+  | { type: 'search_status'; status: 'searching' | 'completed' }
   | { type: 'done'; finishReason: 'stop' | 'tool_calls'; usage: Usage };
 
 /**
@@ -103,14 +105,17 @@ export class UsageUnavailableError extends Error {
  * Transform a tool definition from ModelTurnInput format to
  * OpenAI/DeepSeek API format.
  *
- * Input:  { name, description, inputSchema }
- * Output: { type: "function", function: { name, description, parameters } }
+ * - web_search → { type: "web_search" }（Responses API 原生联网搜索，服务端执行）
+ * - 其余   → { type: "function", function: { name, description, parameters } }
  */
 function transformTool(tool: {
   name: string;
   description: string;
   inputSchema: unknown;
 }): Record<string, unknown> {
+  if (tool.name === 'web_search') {
+    return { type: 'web_search' };
+  }
   return {
     type: 'function',
     function: {
@@ -522,6 +527,10 @@ export class NativeModelAdapter implements ModelAdapter {
         }
         if (chunk.arguments !== undefined) {
           acc.arguments += chunk.arguments;
+        }
+      } else if (chunk.type === 'search_status') {
+        if (options.onSearchStatus) {
+          options.onSearchStatus(chunk.status);
         }
       } else if (chunk.type === 'done') {
         seenDone = true;

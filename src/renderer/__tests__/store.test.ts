@@ -49,6 +49,7 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       create: vi.fn(async () => project),
       open: vi.fn(async () => project),
       pickFolder: vi.fn(async () => null),
+      delete: vi.fn(async () => {}),
     },
     state: { get: vi.fn(async () => project) },
     outline: {
@@ -67,11 +68,11 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       delete: vi.fn(async () => project),
     },
     attachment: {
-      add: vi.fn(async () => project),
-      addFiles: vi.fn(async () => project),
-      pickFiles: vi.fn(async () => project),
+      pickFiles: vi.fn(async () => [{ name: 'a.txt', content: '内容' }]),
       scanWorkspace: vi.fn(async () => []),
-      importWorkspace: vi.fn(async () => project),
+      readWorkspace: vi.fn(async () => ({ name: 'a.txt', content: '内容' })),
+      readContent: vi.fn(async () => ({ name: 'a.txt', content: '内容' })),
+      delete: vi.fn(async () => project),
     },
     visibleView: {
       read: vi.fn(async () => null),
@@ -85,6 +86,7 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
     },
     conversation: {
       send: vi.fn(async () => project),
+      sendWithAttachments: vi.fn(async () => project),
       newTopic: vi.fn(async () => project),
       switchSession: vi.fn(async () => project),
       archiveSession: vi.fn(async () => project),
@@ -213,6 +215,33 @@ describe('store — run 流式事件', () => {
     expect(store.getState().toast?.kind).toBe('error');
   });
 
+  it('organize 成功（Part 4）：结果进瞬态卡片 lastOrganize，不写日志；dismissOrganize 清除', async () => {
+    setApiForTest(makeApi());
+    await store.openProject('/proj');
+    await store.startRun('organize', { scope: { type: 'unorganized' } });
+    store.applyRunEvent({
+      runId: 'run_1',
+      type: 'done',
+      result: { runId: 'run_1', taskKind: 'organize', finalAnswer: '已整理：1 卷 + 15 设定。', turns: 3, toolCallCount: 5, changes: [], cancelled: false },
+    } as RunStreamEvent);
+    expect(store.getState().lastOrganize).toEqual({ runId: 'run_1', finalAnswer: '已整理：1 卷 + 15 设定。' });
+    store.dismissOrganize();
+    expect(store.getState().lastOrganize).toBeNull();
+  });
+
+  it('organize 失败（硬门禁/错误）：不产生结果卡片', async () => {
+    setApiForTest(makeApi());
+    await store.openProject('/proj');
+    await store.startRun('organize', { scope: { type: 'unorganized' } });
+    store.applyRunEvent({
+      runId: 'run_1',
+      type: 'done',
+      result: { runId: 'run_1', taskKind: 'organize', finalAnswer: '', turns: 1, toolCallCount: 0, changes: [], cancelled: false, error: 'ORGANIZE_NO_WRITE_TOOL: 整理任务未调用任何写入工具' },
+    } as RunStreamEvent);
+    expect(store.getState().lastOrganize).toBeNull();
+    await vi.waitFor(() => expect(store.getState().activeRun?.status).toBe('done'));
+  });
+
   it('忽略非当前 runId 的事件', async () => {
     setApiForTest(makeApi());
     await store.openProject('/proj');
@@ -236,12 +265,42 @@ describe('store — 对话操作', () => {
   });
 
   it('刷新消息：启动 refresh run 并显示流式指示', async () => {
+    store.reset();
     const refresh = vi.fn(async () => ({ runId: 'rf_1' }));
     setApiForTest(makeApi({ run: { ...makeApi().run, refresh } }));
     await store.openProject('/proj');
     await store.refreshMessage('m2');
     expect(refresh).toHaveBeenCalledWith('m2');
     expect(store.getState().activeRun?.kind).toBe('chat');
+  });
+
+  it('编辑消息（DeepSeek 式）：提交新版本并自动启动 chat run（重新发送）', async () => {
+    store.reset();
+    const edited = makeProject({
+      messages: [
+        msg('m1', 'user', '旧问题'),
+        msg('m2', 'ai', '回答', 'm1'),
+        { ...msg('m3', 'user', '新问题', 'm1'), timestamp: 't', supersedesId: 'm1' },
+      ],
+      activeMessageId: 'm3',
+    });
+    const edit = vi.fn(async () => edited);
+    const start = vi.fn(async () => ({ runId: 'run_x' }));
+    setApiForTest(makeApi({ conversation: { ...makeApi().conversation, edit }, run: { ...makeApi().run, start } }));
+    await store.openProject('/proj');
+    await store.editMessage('m1', '新问题');
+    expect(edit).toHaveBeenCalledWith('m1', '新问题');
+    // 自动重新发送：run 以取代消息（新版本）为父节点，续写从它开始
+    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm3' });
+    expect(store.getState().activeRun?.status).toBe('running');
+  });
+
+  it('运行中编辑被拒绝（防止并发 run）', async () => {
+    store.reset();
+    setApiForTest(makeApi());
+    await store.openProject('/proj');
+    await store.startRun('chat', {});
+    await expect(store.editMessage('m1', 'x')).rejects.toThrow('RUN_IN_PROGRESS');
   });
 
   it('detailFill：启动正文生成 run（kind=detail_fill）', async () => {
@@ -282,5 +341,106 @@ describe('store — 对话操作', () => {
     expect(store.getState().expandedIds.has('v1')).toBe(true);
     store.toggleExpanded('v1');
     expect(store.getState().expandedIds.has('v1')).toBe(false);
+  });
+});
+
+describe('store — 待发送附件（Part 3，ChatGPT 式）', () => {  it('stageAttachment 入暂存区（不调 API）；removePendingAttachment 移除', () => {
+    setApiForTest(makeApi());
+    store.stageAttachment('大纲.md', '第一章内容', 'uploaded');
+    expect(store.getState().pendingAttachments).toHaveLength(1);
+    expect(store.getState().pendingAttachments[0]).toMatchObject({ name: '大纲.md', content: '第一章内容', source: 'uploaded' });
+    const key = store.getState().pendingAttachments[0].key;
+    store.removePendingAttachment(key);
+    expect(store.getState().pendingAttachments).toHaveLength(0);
+  });
+
+  it('sendWithPending：文本 + 待发送附件一次提交，清空暂存并启动 run', async () => {
+    const sendWithAttachments = vi.fn(async () => makeProject({ activeMessageId: 'm_new' }));
+    const start = vi.fn(async () => ({ runId: 'run_x' }));
+    setApiForTest(makeApi({ conversation: { ...makeApi().conversation, sendWithAttachments }, run: { ...makeApi().run, start } }));
+    await store.openProject('/proj');
+    store.setInputText('帮我看看');
+    store.stageAttachment('旧大纲.txt', '第一章内容', 'uploaded');
+    await store.sendWithPending('帮我看看');
+    expect(sendWithAttachments).toHaveBeenCalledWith('帮我看看', [{ name: '旧大纲.txt', content: '第一章内容', source: 'uploaded' }]);
+    expect(store.getState().inputText).toBe('');
+    expect(store.getState().pendingAttachments).toHaveLength(0);
+    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm_new' });
+  });
+
+  it('sendWithPending：空文本但有附件也可发送；无文本无附件则跳过', async () => {
+    const sendWithAttachments = vi.fn(async () => makeProject({ activeMessageId: 'm_new' }));
+    const start = vi.fn(async () => ({ runId: 'run_x' }));
+    const api = makeApi({ conversation: { ...makeApi().conversation, sendWithAttachments }, run: { ...makeApi().run, start } });
+    setApiForTest(api);
+    await store.openProject('/proj');
+    // 无文本无附件 → 不调 API
+    await store.sendWithPending('');
+    expect(sendWithAttachments).not.toHaveBeenCalled();
+    // 仅有附件
+    store.stageAttachment('旧大纲.txt', '第一章内容', 'uploaded');
+    await store.sendWithPending('');
+    expect(sendWithAttachments).toHaveBeenCalledWith('', [{ name: '旧大纲.txt', content: '第一章内容', source: 'uploaded' }]);
+  });
+
+  it('sendWithPending：长文本自动转为 pasted 附件', async () => {
+    const sendWithAttachments = vi.fn(async () => makeProject({ activeMessageId: 'm_new' }));
+    setApiForTest(makeApi({ conversation: { ...makeApi().conversation, sendWithAttachments } }));
+    await store.openProject('/proj');
+    const longText = '长'.repeat(2001);
+    await store.sendWithPending(longText);
+    const calls = sendWithAttachments.mock.calls as unknown as [string, Array<{ name: string; content: string; source: string }>][];
+    const attachments = calls[0][1];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ name: '长'.repeat(30), content: longText, source: 'pasted' });
+  });
+
+  it('pickFiles：预读文件入暂存区并返回数量', async () => {
+    setApiForTest(makeApi({ attachment: { ...makeApi().attachment, pickFiles: vi.fn(async () => [{ name: 'a.md', content: 'A' }, { name: 'b.md', content: 'B' }]) } }));
+    await store.openProject('/proj');
+    const n = await store.pickFiles();
+    expect(n).toBe(2);
+    expect(store.getState().pendingAttachments.map((a) => a.name)).toEqual(['a.md', 'b.md']);
+  });
+
+  it('deleteAttachment：调用 API 删除并 adopt 新 state', async () => {
+    const project = makeProject();
+    const del = vi.fn(async () => project);
+    setApiForTest(makeApi({ attachment: { ...makeApi().attachment, delete: del } }));
+    await store.openProject('/proj');
+    await store.deleteAttachment('att_1');
+    expect(del).toHaveBeenCalledWith('att_1');
+    expect(store.getState().project).toBe(project);
+  });
+});
+
+describe('store — 项目删除（项目级，移到系统回收站）', () => {
+  it('删除非打开项目：调用 API 并刷新项目列表，停留在当前项目', async () => {
+    store.reset();
+    const del = vi.fn(async () => {});
+    const list = vi.fn(async () => [{ dir: '/other', name: '别的项目', createdAt: 't' }]);
+    setApiForTest(makeApi({ project: { ...makeApi().project, delete: del, list } }));
+    await store.openProject('/proj');
+    await store.deleteProject('/other');
+    expect(del).toHaveBeenCalledWith('/other');
+    expect(list).toHaveBeenCalled();
+    // 当前打开项目不受影响
+    expect(store.getState().project?.dir).toBe('/proj');
+  });
+
+  it('删除当前打开项目：调用 API、回到项目列表并刷新', async () => {
+    store.reset();
+    const del = vi.fn(async () => {});
+    const list = vi.fn(async () => []);
+    setApiForTest(makeApi({ project: { ...makeApi().project, delete: del, list } }));
+    await store.openProject('/proj');
+    store.setInputText('草稿');
+    store.stageAttachment('a.txt', '内容', 'uploaded');
+    await store.deleteProject('/proj');
+    expect(del).toHaveBeenCalledWith('/proj');
+    expect(store.getState().project).toBeNull();
+    expect(store.getState().inputText).toBe('');
+    expect(store.getState().pendingAttachments).toHaveLength(0);
+    expect(list).toHaveBeenCalled();
   });
 });

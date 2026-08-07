@@ -3,7 +3,7 @@ import * as path from 'path';
 import { AppService } from '../app-service';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import { makeTempDir, removeDir } from './helpers/temp-project';
-import type { ModelAdapter } from '../agent-runtime/model-types';
+import type { ModelAdapter, ModelTurnInput, ModelTurn } from '../agent-runtime/model-types';
 import type { OrganizeScope } from '../../shared/ipc-types';
 
 // 与机器上的真实凭据库解耦
@@ -31,6 +31,26 @@ function makeService(script: ScriptedTurn[]): AppService {
   tempDirs.push(root);
   service.createProject(path.join(root, 'proj'), '测试项目');
   return service;
+}
+
+/** 记录每次模型输入的适配器（断言模型实际收到的上下文，Part 5）。 */
+class InputRecordingModel implements ModelAdapter {
+  readonly provider = 'recording';
+  readonly inputs: ModelTurnInput[] = [];
+  constructor(private readonly inner: ModelAdapter) {}
+  async runTurn(input: ModelTurnInput, options?: unknown): Promise<ModelTurn> {
+    this.inputs.push(input);
+    return this.inner.runTurn(input, options as never);
+  }
+}
+
+function makeRecordingService(script: ScriptedTurn[]): { service: AppService; model: InputRecordingModel } {
+  const model = new InputRecordingModel(new ScriptedModelAdapter(script));
+  const service = new AppService(() => model);
+  const root = makeTempDir();
+  tempDirs.push(root);
+  service.createProject(path.join(root, 'proj'), '测试项目');
+  return { service, model };
 }
 
 describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回滚', () => {
@@ -73,7 +93,7 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
     expect(state.nodes.find((n) => n.id === 'v1')?.hasDraft).toBe(true);
   });
 
-  it('整理 → 回滚：草稿与设定全部恢复，日志不可变', async () => {
+  it('整理 → 回滚：草稿与设定全部恢复，日志零新增（organize 沙箱化，Part 4）', async () => {
     const service = makeService([
       { type: 'tool_calls', toolCalls: [toolCall('c1', 'create_node', { type: 'chapter', title: '第一章', nodeId: 'c1' })], usage: usage(5, 2) },
       { type: 'tool_calls', toolCalls: [toolCall('c2', 'write_draft', { nodeId: 'c1', content: '待定：出场方式' })], usage: usage(10, 2) },
@@ -87,13 +107,14 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
     service.rollbackRun(result.runId);
     const after = service.getState();
     expect(after.nodes.find((n) => n.id === 'c1')).toBeUndefined();
-    expect(after.messages).toHaveLength(before.messages.length + 3); // 运行开始/结束 + AI 回答
+    expect(after.messages).toHaveLength(before.messages.length); // 整理不写日志：零新增（Part 4）
     expect(after.runSummaries[0].runId).toBe(result.runId);
   });
 
   it('organize 范围 = 未整理 + 自然语言附注（ux-review §4.2）', async () => {
     const service = makeService([
       { type: 'tool_calls', toolCalls: [toolCall('c1', 'read_attachment', { attachmentId: 'att_1' })], usage: usage(5, 1) },
+      { type: 'tool_calls', toolCalls: [toolCall('c2', 'write_draft', { nodeId: 'overview', content: '总纲草稿' })], usage: usage(8, 2) },
       { type: 'final', answer: '大纲已结构化。', usage: usage(10, 2) },
     ]);
     service.addAttachment('旧大纲.txt', '第一章：主角登场\n第二章：案件发生');
@@ -106,28 +127,52 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
 
     const result = await service.run({ kind: 'organize', scope: { type: 'unorganized' }, note: '只整理我刚上传的文件' });
     expect(result.error).toBeUndefined();
-    // 自然语言附注进入范围描述（运行开始事件的 system 消息）
-    expect(service.getState().messages.some((m) => m.role === 'system' && m.content.includes('附注：只整理我刚上传的文件'))).toBe(true);
+    // 自然语言附注进入范围描述（organize 沙箱化后不在运行事件里，改存运行摘要）
+    expect(service.getState().runSummaries[0].scope).toContain('附注：只整理我刚上传的文件');
     // 范围消化过的附件记录所用 hash → 附件行新鲜度机制（§4.3）
     expect(service.workspace.attachments.readAttachmentMeta(attachmentId)!.lastStructured?.runId).toBe(result.runId);
-    expect(service.getState().organizeCursor).toBeTruthy();
+    // 光标推进到范围最后一条消息（organize 不写日志，光标不再指向运行结束事件）
+    expect(service.getState().organizeCursor).toBe(service.getState().messages.at(-1)!.id);
+    // 沙箱化：整理不产生任何日志行
+    expect(service.getState().messages).toHaveLength(state.messages.length);
   });
 
   it('重新整理全部对话（scope=all）', async () => {
     const service = makeService([
-      { type: 'final', answer: '全部整理完成。', usage: usage(5, 2) },
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'write_asset', { type: 'character', title: '主角', content: '侦探' })], usage: usage(5, 2) },
+      { type: 'final', answer: '全部整理完成。', usage: usage(10, 2) },
     ]);
     service.sendMessage('旧讨论一');
     service.sendMessage('旧讨论二');
     const result = await service.run({ kind: 'organize', scope: { type: 'all' } });
     expect(result.error).toBeUndefined();
+    // 光标推进到全日志最后一条消息
     expect(service.getState().organizeCursor).toBe(service.getState().messages.at(-1)!.id);
+    // 沙箱化：整理不写日志（消息数不变）
+    expect(service.getState().messages).toHaveLength(2);
+  });
+
+  it('整理硬门禁（Part 4）：模型只输出讨论未调用写入工具 → ORGANIZE_NO_WRITE_TOOL，光标不推进', async () => {
+    const service = makeService([
+      { type: 'final', answer: '这些不是整理任务，而是讨论任务。请选一个方向往下钻。', usage: usage(5, 2) },
+    ]);
+    service.sendMessage('第一幕在码头');
+    const before = service.getState();
+    const result = await service.run({ kind: 'organize', scope: { type: 'unorganized' } });
+    expect(result.error).toContain('ORGANIZE_NO_WRITE_TOOL');
+    // 光标不推进 → 内容保持未整理
+    expect(service.getState().organizeCursor).toBeUndefined();
+    expect(service.getState().unorganizedCount ?? service.getState().messages).toBeTruthy();
+    // 沙箱化：日志零新增；附件不被标记为已消化
+    expect(service.getState().messages).toHaveLength(before.messages.length);
+    expect(service.getState().runSummaries[0]?.snapshotId).toBe(result.runId); // 快照仍建，可回滚
   });
 
   it('调用详情（ux-review §4.7）：conversation/runs/<runId>.json 全任务记录', async () => {
     const service = makeService([
       { type: 'tool_calls', toolCalls: [toolCall('c1', 'read_node', { nodeId: 'overview' })], usage: usage(5, 1) },
       { type: 'final', answer: '角色一致：林默是侦探。', usage: usage(10, 2) },
+      { type: 'final', answer: '林默的侦探设定讨论', usage: usage(5, 1) }, // 会话标题生成（用户反馈 2）
     ]);
     service.sendMessage('林默是侦探吗');
     const result = await service.run({ kind: 'chat' });
@@ -152,6 +197,11 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
     // 文件确实落盘
     const fs = require('fs') as typeof import('fs');
     expect(fs.existsSync(path.join(service.dir, 'conversation', 'runs', `${result.runId}.json`))).toBe(true);
+
+    // 用户反馈 2：首个对话 run 完成后 AI 自动命名会话标题（替换「话题 N」占位）
+    const session = service.getState().sessions[0];
+    expect(session.title).toBe('林默的侦探设定讨论');
+    expect(session.titleAuto).toBeFalsy();
   });
 
   it('调用详情：压缩任务也记录（taskKind=compress）', async () => {
@@ -227,6 +277,7 @@ describe('app-service — 消息树时间线控制（§3.2）', () => {
   it('刷新：旧 AI 回复保留为兄弟分支，新回复 supersedes 它', async () => {
     const service = makeService([
       { type: 'final', answer: '第一版回答', usage: usage(5, 2) },
+      { type: 'final', answer: '会话标题', usage: usage(5, 1) }, // 首个 chat run 后的自动命名
       { type: 'final', answer: '第二版回答', usage: usage(10, 2) },
     ]);
     service.sendMessage('这个问题怎么看？');
@@ -248,7 +299,7 @@ describe('app-service — 消息树时间线控制（§3.2）', () => {
     expect(newAi.parentId).toBe(userMsgId);
   });
 
-  it('刷新非 AI 消息抛错；活动路径切换生效', async () => {
+  it('刷新非 AI 消息抛错；活动路径切换落到最深续写尾（DeepSeek 式版本导航）', async () => {
     const service = makeService([]);
     service.sendMessage('一个问题');
     const state = service.getState();
@@ -256,8 +307,12 @@ describe('app-service — 消息树时间线控制（§3.2）', () => {
 
     service.sendMessage('分支一');
     const s2 = service.getState();
+    // 切到 m1（有续写 m2）→ 活动路径落到 m2（m1 的最深续写尾）
     service.switchBranch(s2.messages[0].id);
-    expect(service.getState().activeMessageId).toBe(s2.messages[0].id);
+    expect(service.getState().activeMessageId).toBe(s2.messages[1].id);
+    // 叶子消息切换 → 落到自身
+    service.switchBranch(s2.messages[1].id);
+    expect(service.getState().activeMessageId).toBe(s2.messages[1].id);
   });
 
   it('开启新话题（ux-review §4.5）：新建会话不归档；旧话题可切回继续聊；归档后完全只读', async () => {
@@ -328,6 +383,28 @@ describe('app-service — 消息树时间线控制（§3.2）', () => {
     expect(s3.messages.some((m) => m.content === '保留的话题')).toBe(true);
     expect(s3.activeSessionId).toBe(topic2.id);
   });
+
+  it('开启新话题守卫（用户反馈 3）：当前话题为空时不能新建话题', () => {
+    const service = makeService([]);
+    // 全新项目：活动会话尚无消息 → 拒绝
+    expect(() => service.newTopic()).toThrow('TOPIC_EMPTY');
+    // 发送首条消息后 → 可新建
+    service.sendMessage('第一句话');
+    expect(() => service.newTopic()).not.toThrow();
+    expect(service.getState().sessions).toHaveLength(2);
+  });
+
+  it('AI 自动命名失败时静默保留占位标题（用户反馈 2 降级路径）', async () => {
+    const service = makeService([
+      { type: 'final', answer: '回答', usage: usage(5, 2) },
+      // 标题生成需要的第二个 turn 缺失 → ScriptExhaustedError → 静默保留占位
+    ]);
+    service.sendMessage('主角是谁');
+    await service.run({ kind: 'chat' });
+    const session = service.getState().sessions[0];
+    expect(session.titleAuto).toBe(true);
+    expect(session.title).toMatch(/^话题 \d+$/);
+  });
 });
 
 describe('app-service — 状态汇总', () => {
@@ -344,5 +421,232 @@ describe('app-service — 状态汇总', () => {
     expect(state.messages.length).toBeGreaterThanOrEqual(2);
     expect(state.dir).toBeTruthy();
     expect(state.hasApiKey).toBe(false);
+  });
+});
+
+describe('app-service — 附件生命周期（Part 1：删除入口）', () => {
+  it('删除会话不删附件；附件独立于会话存在（附件是项目一等对象）', () => {
+    const service = makeService([]);
+    service.addAttachment('旧大纲.txt', '第一章：主角登场');
+    const state = service.getState();
+    const attachmentId = state.attachments[0].id;
+    const session = state.sessions[0];
+
+    service.deleteSession(session.id);
+    const after = service.getState();
+    expect(after.sessions.find((s) => s.id === session.id)).toBeUndefined();
+    // 附件仍在（项目级对象），且引用消息已随会话删除
+    expect(after.attachments[0].id).toBe(attachmentId);
+    expect(service.readAttachmentContent(attachmentId)).not.toBeNull();
+  });
+
+  it('deleteAttachment：从状态移除，正文文件删除，readAttachmentContent 返回 null', () => {
+    const service = makeService([]);
+    service.addAttachment('旧大纲.txt', '第一章：主角登场');
+    const attachmentId = service.getState().attachments[0].id;
+    const state = service.deleteAttachment(attachmentId);
+    expect(state.attachments).toHaveLength(0);
+    expect(service.readAttachmentContent(attachmentId)).toBeNull();
+  });
+
+  it('删除附件后，历史引用消息仍保留但附件行隐藏（引用消息内容不变）', () => {
+    const service = makeService([]);
+    service.addAttachment('旧大纲.txt', '内容');
+    const attachmentId = service.getState().attachments[0].id;
+    const refMessage = service.getState().messages.find((m) => m.refs?.attachmentIds?.includes(attachmentId))!;
+    expect(refMessage).toBeTruthy();
+
+    service.deleteAttachment(attachmentId);
+    const after = service.getState();
+    expect(after.messages.some((m) => m.id === refMessage.id)).toBe(true);
+    expect(after.messages.find((m) => m.id === refMessage.id)!.refs?.attachmentIds).toEqual([attachmentId]);
+    expect(after.attachments).toHaveLength(0);
+  });
+});
+
+describe('app-service — 待发送附件提交（Part 3：sendWithAttachments）', () => {
+  it('一次提交：附件逐个落盘并追加引用消息（在前），文本消息（在后）', () => {
+    const service = makeService([]);
+    const state = service.sendWithAttachments('帮我看看这份大纲', [
+      { name: '旧大纲.txt', content: '第一章：主角登场', source: 'uploaded' },
+      { name: '设定.md', content: '主角：林默', source: 'workspace' },
+    ]);
+    expect(state.attachments.map((a) => a.name)).toEqual(['旧大纲.txt', '设定.md']);
+    const messages = state.messages;
+    expect(messages).toHaveLength(3);
+    expect(messages[0].content).toBe('（附件：旧大纲.txt）');
+    expect(messages[0].refs?.attachmentIds).toEqual([state.attachments[0].id]);
+    expect(messages[1].content).toBe('（附件：设定.md）');
+    expect(messages[1].refs?.attachmentIds).toEqual([state.attachments[1].id]);
+    expect(messages[2].content).toBe('帮我看看这份大纲');
+    expect(messages[2].refs).toBeUndefined();
+    // 引用消息不存正文
+    expect(messages[0].content).not.toContain('主角登场');
+  });
+
+  it('空文本但有附件可发送；空文本且无附件抛 EMPTY_SEND', () => {
+    const service = makeService([]);
+    const state = service.sendWithAttachments('', [{ name: 'a.txt', content: 'A', source: 'uploaded' }]);
+    expect(state.messages).toHaveLength(1);
+    expect(() => service.sendWithAttachments('', [])).toThrow('EMPTY_SEND');
+  });
+
+  it('归档会话拒绝发送附件（只读守卫）', () => {
+    const service = makeService([]);
+    service.sendMessage('第一条');
+    const session = service.getState().sessions[0];
+    service.archiveSession(session.id);
+    expect(() => service.sendWithAttachments('x', [{ name: 'a.txt', content: 'A', source: 'uploaded' }])).toThrow('SESSION_ARCHIVED');
+  });
+
+  it('readWorkspaceFile：只读项目顶层文本文件；保留文件/系统目录返回 null', () => {
+    const service = makeService([]);
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    fs.writeFileSync(path.join(service.dir, '散落笔记.md'), '散落内容', 'utf-8');
+    expect(service.readWorkspaceFile('散落笔记.md')).toEqual({ name: '散落笔记.md', content: '散落内容' });
+    expect(service.readWorkspaceFile('project.json')).toBeNull();
+    expect(service.readWorkspaceFile('nodes')).toBeNull();
+    expect(service.readWorkspaceFile('不存在.txt')).toBeNull();
+  });
+});
+
+describe('app-service — 项目删除（项目级，删除后移到系统回收站）', () => {
+  it('非项目目录抛 NOT_A_PROJECT（防误删任意目录）', () => {
+    const service = makeService([]);
+    const fs = require('fs') as typeof import('fs');
+    const root = makeTempDir();
+    tempDirs.push(root);
+    expect(() => service.deleteProject(root)).toThrow('NOT_A_PROJECT');
+    // 目录确实未被删除
+    expect(fs.existsSync(root)).toBe(true);
+  });
+
+  it('删除未打开的项目：不关闭当前项目，返回 wasOpen=false', () => {
+    const service = makeService([]);
+    const other = makeTempDir();
+    tempDirs.push(other);
+    const fs = require('fs') as typeof import('fs');
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, 'project.json'), JSON.stringify({ name: '别的项目', createdAt: 't' }), 'utf-8');
+    const result = service.deleteProject(other);
+    expect(result.wasOpen).toBe(false);
+    expect(() => service.getState()).not.toThrow(); // 当前项目仍打开
+  });
+
+  it('删除当前打开的项目：先关闭（wasOpen=true），之后状态不可用', () => {
+    const service = makeService([]);
+    const dir = service.dir;
+    const fs = require('fs') as typeof import('fs');
+    fs.writeFileSync(path.join(dir, 'project.json'), JSON.stringify({ name: '测试项目', createdAt: 't' }), 'utf-8');
+    const result = service.deleteProject(dir);
+    expect(result.wasOpen).toBe(true);
+    expect(() => service.getState()).toThrow('NO_PROJECT_OPEN');
+  });
+});
+
+describe('app-service — 附件正文内联（Part 5：首轮上下文直接注入附件内容）', () => {
+  it('chat 首次模型输入即含附件完整正文（不再依赖模型主动读取）', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'final', answer: '收到。', usage: usage(5, 2) },
+      { type: 'final', answer: '标题', usage: usage(5, 1) }, // 自动命名
+    ]);
+    service.addAttachment('旧大纲.txt', '第一章：主角登场\n第二章：案件发生');
+    const result = await service.run({ kind: 'chat' });
+    expect(result.error).toBeUndefined();
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).toContain('（附件：旧大纲.txt）');
+    expect(content).toContain('【附件正文（17 字）】');
+    expect(content).toContain('第一章：主角登场');
+    expect(content).toContain('第二章：案件发生');
+    // 日志仍只存引用（内联是内存视图，不写日志）
+    const logMessages = service.getState().messages;
+    expect(logMessages.every((m) => !m.content.includes('第一章：主角登场'))).toBe(true);
+  });
+
+  it('超过内联上限的附件不内联，提示必须先 read_attachment', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'final', answer: '收到。', usage: usage(5, 2) },
+      { type: 'final', answer: '标题', usage: usage(5, 1) },
+    ]);
+    const big = '长'.repeat(12001);
+    service.addAttachment('超大材料.md', big);
+    await service.run({ kind: 'chat' });
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).not.toContain('【附件正文（12001 字）】');
+    expect(content).not.toContain('长'.repeat(100)); // 正文未内联
+    expect(content).toContain('过大未内联');
+    expect(content).toContain('必须先调用 read_attachment 读取完整正文');
+  });
+
+  it('附件已被删除：内联提示缺失，不编造内容', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'final', answer: '收到。', usage: usage(5, 2) },
+      { type: 'final', answer: '标题', usage: usage(5, 1) },
+    ]);
+    service.addAttachment('已删材料.txt', '机密内容');
+    const attachmentId = service.getState().attachments[0].id;
+    service.deleteAttachment(attachmentId);
+    await service.run({ kind: 'chat' });
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).toContain('附件已被删除');
+    expect(content).not.toContain('机密内容');
+  });
+
+  it('organize 范围消息同样内联附件正文', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'write_asset', { type: 'character', title: '主角', content: '侦探' })], usage: usage(5, 2) },
+      { type: 'final', answer: '已整理。', usage: usage(8, 2) },
+    ]);
+    service.addAttachment('旧大纲.txt', '第一章：主角登场');
+    await service.run({ kind: 'organize', scope: { type: 'unorganized' } });
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).toContain('第一章：主角登场');
+  });
+
+  it('inspectContext 与调用一致：内联后 token 估算计入附件正文', () => {
+    const service = makeService([]);
+    const baseline = service.inspectContext();
+    service.addAttachment('大纲.txt', '正文内容'.repeat(300));
+    const after = service.inspectContext();
+    expect(after.estimatedTokens).toBeGreaterThan(baseline.estimatedTokens);
+  });
+
+  it('编辑后发送：模型输入只含新文本，旧文本不进上下文', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'final', answer: '明白了。', usage: usage(5, 2) },
+      { type: 'final', answer: '标题', usage: usage(5, 1) }, // 自动命名
+    ]);
+    service.sendMessage('原始问题');
+    const userMsgId = service.getState().messages[0].id;
+    service.editMessage(userMsgId, '修改后的问题');
+    const result = await service.run({ kind: 'chat' });
+    expect(result.error).toBeUndefined();
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).toContain('修改后的问题');
+    expect(content).not.toContain('原始问题');
+    expect(content).not.toContain('消息已编辑');
+  });
+
+  it('存量日志中的「消息已编辑」事件在模型输入中被剔除（兼容旧日志）', async () => {
+    const { service, model } = makeRecordingService([
+      { type: 'final', answer: '明白了。', usage: usage(5, 2) },
+      { type: 'final', answer: '标题', usage: usage(5, 1) },
+    ]);
+    service.sendMessage('当前问题');
+    // 模拟旧版本产生的记账事件：新消息取代它（旧文本 = 已废弃内容）
+    const replacement = service.editMessage(service.getState().messages[0].id, '新版本问题');
+    service.workspace.conversation.appendMessage({
+      id: 'legacy_edit_event',
+      role: 'system',
+      content: '（消息已编辑）原内容：\n已废弃的旧文本',
+      timestamp: 't',
+      parentId: replacement.id,
+    });
+    await service.run({ kind: 'chat' });
+    const content = model.inputs[0].messages.map((m) => ('content' in m ? m.content : '')).join('\n');
+    expect(content).toContain('新版本问题');
+    expect(content).not.toContain('已废弃的旧文本');
+    expect(content).not.toContain('消息已编辑');
   });
 });

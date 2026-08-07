@@ -82,6 +82,8 @@ export interface ModelTurnOptions {
   onChunk?: (chunk: string) => void;
   /** 思维链增量回调（DeepSeek V4 思考模式；供 UI 展示思考进度） */
   onReasoning?: (text: string) => void;
+  /** 服务端联网搜索状态回调（Responses API 原生 web_search；供 UI 展示搜索进度） */
+  onSearchStatus?: (status: 'searching' | 'completed') => void;
 }
 
 /** Adapter interface for LLM backends */

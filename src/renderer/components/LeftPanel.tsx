@@ -9,6 +9,7 @@ import { store, useStore, type TabId } from '../store';
 import { confirmDialog, promptDialog } from './ui/dialog';
 import type { NodeSummary } from '../../shared/ipc-types';
 import type { ConversationSession } from '../../shared/types';
+import { ASSET_TYPE_LABELS, assetTypeLabel } from '../../shared/types';
 
 // --------------------------------------------------------------------------- 大纲树
 
@@ -160,7 +161,7 @@ function AssetItem({ assetId, title, type }: { assetId: string; title: string; t
       className={`tree-row${selected ? ' selected' : ''}`}
       onClick={() => store.selectAsset(assetId)}
     >
-      <span className="tree-type">{type}</span>
+      <span className="tree-type">{assetTypeLabel(type)}</span>
       <span className="tree-title">{title || '（未命名）'}</span>
     </div>
   );
@@ -170,6 +171,18 @@ function SessionItem({ session }: { session: ConversationSession }): React.React
   const activeSessionId = useStore((s) => s.project?.activeSessionId);
   const isActive = session.id === activeSessionId;
   const archived = session.archived === true;
+  // 用户反馈 2：归档/删除改为右键菜单触发（ChatGPT 式收敛，行内不再平铺按钮）
+  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!menu) return;
+    const onDocClick = (e: MouseEvent): void => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [menu]);
 
   const archive = async (): Promise<void> => {
     try {
@@ -196,17 +209,41 @@ function SessionItem({ session }: { session: ConversationSession }): React.React
   };
 
   return (
-    <div className={`tree-row session-row${isActive ? ' selected' : ''}`}>
-      <div className="session-row-main" onClick={() => void store.switchSession(session.id)} title={archived ? '查看归档会话（只读）' : '切换到该会话继续聊'}>
-        <span className="tree-title">{session.title || '（未命名）'}</span>
-        {isActive && <span className="badge">当前</span>}
-        {archived && <span className="badge">已归档</span>}
-        <span className="muted small">{new Date(session.archivedAt).toLocaleDateString()}</span>
-      </div>
-      <div className="session-row-actions">
-        <button className="tiny-btn" onClick={() => void archive()}>{archived ? '取消归档' : '归档'}</button>
-        <button className="tiny-btn" onClick={() => void remove()}>删除</button>
-      </div>
+    <div
+      className={`tree-row session-row${isActive ? ' selected' : ''}`}
+      onClick={() => void store.switchSession(session.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+      title={archived ? '查看归档会话（只读）· 右键管理' : '切换到该会话继续聊 · 右键管理'}
+    >
+      <span className="tree-title">{session.title || '（未命名）'}</span>
+      {isActive && <span className="badge">当前</span>}
+      {archived && <span className="badge">已归档</span>}
+      <span className="muted small">{new Date(session.archivedAt).toLocaleDateString()}</span>
+      {menu && (
+        <div className="ctx-menu" ref={menuRef} style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
+          <button
+            className="ctx-menu-item"
+            onClick={() => {
+              void archive();
+              setMenu(null);
+            }}
+          >
+            {archived ? '取消归档' : '归档'}
+          </button>
+          <button
+            className="ctx-menu-item danger"
+            onClick={() => {
+              void remove();
+              setMenu(null);
+            }}
+          >
+            删除…
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -245,8 +282,8 @@ function NewAssetForm({ onClose }: { onClose: () => void }): React.ReactElement 
   return (
     <div className="mini-form">
       <select value={type} onChange={(e) => setType(e.target.value)}>
-        {['character', 'worldbuilding', 'timeline', 'location', 'prop', 'foreshadow', 'misc'].map((t) => (
-          <option key={t} value={t}>{t}</option>
+        {Object.entries(ASSET_TYPE_LABELS).map(([value, label]) => (
+          <option key={value} value={value}>{label}</option>
         ))}
       </select>
       <input placeholder="标题" value={title} onChange={(e) => setTitle(e.target.value)} />

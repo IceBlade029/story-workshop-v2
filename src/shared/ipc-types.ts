@@ -162,6 +162,7 @@ export type RunStreamEvent =
   | { type: 'start'; runId: string }
   | { type: 'chunk'; runId: string; text: string; reasoningContent?: string }
   | { type: 'trace'; runId: string; trace: ToolCallTrace }
+  | { type: 'search'; runId: string; status: 'searching' | 'completed' }
   | { type: 'done'; runId: string; result: RunResultPayload }
   | { type: 'error'; runId: string; message: string };
 
@@ -197,6 +198,8 @@ export interface RendererApi {
     create(name: string): Promise<ProjectState>;
     open(dir: string): Promise<ProjectState>;
     pickFolder(): Promise<string | null>;
+    /** 删除项目（确认后移到系统回收站，可恢复）；打开中的项目会自动关闭 */
+    delete(dir: string): Promise<void>;
   };
   state: {
     get(): Promise<ProjectState>;
@@ -219,18 +222,16 @@ export interface RendererApi {
     delete(assetId: string): Promise<ProjectState>;
   };
   attachment: {
-    /** 文本落为附件（§3.2 长文本粘贴 / 入口 B）；source 缺省 pasted，拖入/上传用 uploaded */
-    add(name: string, content: string, source?: 'pasted' | 'uploaded'): Promise<ProjectState>;
-    /** 把本地文件读取为附件（source: 'uploaded'，§3.1）；无成功文件时返回 null */
-    addFiles(paths: string[]): Promise<ProjectState | null>;
-    /** 文件选择对话框 → 上传为附件；取消返回 null */
-    pickFiles(): Promise<ProjectState | null>;
+    /** 文件选择对话框 → 预读文件内容（Part 3：发送时才落盘）；取消/无成功文件返回 null */
+    pickFiles(): Promise<Array<{ name: string; content: string }> | null>;
     /** 扫描项目文件夹顶层散落的文本文件（「项目文件」分组，§3.1） */
     scanWorkspace(): Promise<Array<{ name: string; size: number }>>;
-    /** 把项目文件夹中的文件添加为附件（内容复制进 attachments/，原文件不移动，§3.1） */
-    importWorkspace(names: string[]): Promise<ProjectState>;
+    /** 只读项目顶层文本文件（待发送附件预读）；不存在返回 null */
+    readWorkspace(name: string): Promise<{ name: string; content: string } | null>;
     /** 读取附件完整正文（附件行展开用）；不存在返回 null */
     readContent(attachmentId: string): Promise<{ name: string; content: string } | null>;
+    /** 删除附件（确认后永久删除）：移除索引条目与正文文件；历史消息引用该附件的行为自动隐藏 */
+    delete(attachmentId: string): Promise<ProjectState>;
   };
   visibleView: {
     /** 读取场景可见视图；不存在返回 null */
@@ -254,6 +255,8 @@ export interface RendererApi {
   };
   conversation: {
     send(content: string): Promise<ProjectState>;
+    /** 一次提交「文本 + 待发送附件」（Part 3：附件发送时才落盘进对话） */
+    sendWithAttachments(content: string, attachments: Array<{ name: string; content: string; source?: 'pasted' | 'uploaded' | 'workspace' }>): Promise<ProjectState>;
     /** 开启新话题（ux-review §4.5：新建空会话并设为活动，不归档当前话题） */
     newTopic(title?: string): Promise<ProjectState>;
     /** 切换会话（ChatGPT 式：活动路径末端 = 该会话 tail；空会话 → 空视图） */

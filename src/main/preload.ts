@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     create: (name: string) => ipcRenderer.invoke('project:create', name),
     open: (dir: string) => ipcRenderer.invoke('project:open', dir),
     pickFolder: () => ipcRenderer.invoke('project:pickFolder'),
+    delete: (dir: string) => ipcRenderer.invoke('project:delete', dir),
   },
   state: {
     get: () => ipcRenderer.invoke('state:get'),
@@ -36,12 +37,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (assetId: string) => ipcRenderer.invoke('asset:delete', assetId),
   },
   attachment: {
-    add: (name: string, content: string, source?: 'pasted' | 'uploaded') => ipcRenderer.invoke('attachment:add', name, content, source),
-    addFiles: (paths: string[]) => ipcRenderer.invoke('attachment:addFiles', paths),
+    /** 文件选择对话框 → 预读文件内容（Part 3：不落盘，发送时提交）；取消返回 null */
     pickFiles: () => ipcRenderer.invoke('attachment:pickFiles'),
     scanWorkspace: () => ipcRenderer.invoke('attachment:scanWorkspace'),
-    importWorkspace: (names: string[]) => ipcRenderer.invoke('attachment:importWorkspace', names),
+    /** 只读项目顶层文本文件（待发送附件预读）；不存在返回 null */
+    readWorkspace: (name: string) => ipcRenderer.invoke('attachment:readWorkspace', name),
     readContent: (attachmentId: string) => ipcRenderer.invoke('attachment:readContent', attachmentId),
+    delete: (attachmentId: string) => ipcRenderer.invoke('attachment:delete', attachmentId),
   },
   visibleView: {
     read: (sceneId: string) => ipcRenderer.invoke('visibleView:read', sceneId),
@@ -58,6 +60,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   conversation: {
     send: (content: string) => ipcRenderer.invoke('conversation:send', content),
+    /** 一次提交「文本 + 待发送附件」（Part 3：附件发送时才落盘进对话） */
+    sendWithAttachments: (content: string, attachments: Array<{ name: string; content: string; source?: 'pasted' | 'uploaded' | 'workspace' }>) =>
+      ipcRenderer.invoke('conversation:sendWithAttachments', content, attachments),
     newTopic: (title?: string) => ipcRenderer.invoke('conversation:newTopic', title),
     switchSession: (sessionId: string) => ipcRenderer.invoke('conversation:switchSession', sessionId),
     archiveSession: (sessionId: string) => ipcRenderer.invoke('conversation:archiveSession', sessionId),

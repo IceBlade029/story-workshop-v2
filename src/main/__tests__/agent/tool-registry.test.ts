@@ -18,16 +18,19 @@ function makeRuntime() {
 }
 
 describe('task-definitions — 白名单（§8.2 精确集合）', () => {
-  const CHAT = ['search_nodes', 'search_conversation', 'read_node', 'read_draft', 'list_nodes', 'read_asset', 'list_assets', 'list_attachments', 'read_attachment', 'read_visible_view'];
+  const CHAT_READ = ['search_nodes', 'search_conversation', 'read_node', 'read_draft', 'list_nodes', 'read_asset', 'list_assets', 'list_attachments', 'read_attachment', 'list_all_attachments', 'read_any_attachment', 'read_visible_view'];
+  const CHAT = [...CHAT_READ, 'web_search'];
 
-  it('chat：只有只读工具，无任何写入工具', () => {
+  it('chat：只有只读工具（+ 服务端联网搜索），无任何写入工具', () => {
     expect(TASK_DEFINITIONS.chat.whitelist).toEqual(CHAT);
     const writeTools = ['write_draft', 'create_node', 'rename_node', 'delete_node', 'write_asset', 'write_output'];
     for (const t of writeTools) expect(TASK_DEFINITIONS.chat.whitelist).not.toContain(t);
+    expect(TASK_DEFINITIONS.chat.systemPrompt).toContain('联网搜索');
   });
 
-  it('organize：chat 全部 + 5 个写入工具', () => {
-    expect(TASK_DEFINITIONS.organize.whitelist).toEqual([...CHAT, 'write_draft', 'create_node', 'rename_node', 'delete_node', 'write_asset']);
+  it('organize：chat 只读全部 + 5 个写入工具（无联网搜索）', () => {
+    expect(TASK_DEFINITIONS.organize.whitelist).toEqual([...CHAT_READ, 'write_draft', 'create_node', 'rename_node', 'delete_node', 'write_asset']);
+    expect(TASK_DEFINITIONS.organize.whitelist).not.toContain('web_search');
   });
 
   it('四个任务类型：chat / organize / detail_fill / revise（§8.2 + ux-review §5.3）', () => {

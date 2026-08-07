@@ -3,15 +3,27 @@ import { DeepSeekTransport } from '../model-transport';
 
 const chatCompletion = vi.fn();
 const chatCompletionStream = vi.fn();
+const responsesCompletion = vi.fn();
+const responsesStream = vi.fn();
 
 vi.mock('../llm-client', () => ({
   chatCompletion: (...args: unknown[]) => chatCompletion(...args),
   chatCompletionStream: (...args: unknown[]) => chatCompletionStream(...args),
+  responsesCompletion: (...args: unknown[]) => responsesCompletion(...args),
+  responsesStream: (...args: unknown[]) => responsesStream(...args),
+}));
+
+let settingsModel: string = 'deepseek-v4-flash';
+vi.mock('../settings-store', () => ({
+  getSettings: () => ({ model: settingsModel, thinking: true, reasoningEffort: 'high', notifications: true }),
 }));
 
 afterEach(() => {
   chatCompletion.mockReset();
   chatCompletionStream.mockReset();
+  responsesCompletion.mockReset();
+  responsesStream.mockReset();
+  settingsModel = 'deepseek-v4-flash';
 });
 
 describe('DeepSeekTransport — 非流式', () => {
@@ -107,5 +119,137 @@ describe('DeepSeekTransport — 流式', () => {
     const first = await iter[Symbol.asyncIterator]().next();
     expect(first.value.type).toBe('text_delta');
     await expect(iter[Symbol.asyncIterator]().next()).rejects.toThrow('stream broke');
+  });
+});
+
+// ===========================================================================
+// Responses API 路由（原生 web_search）
+// ===========================================================================
+
+const wsTools = [{ type: 'web_search' }];
+
+describe('DeepSeekTransport — Responses API 路由', () => {
+  it('工具含 web_search 且模型为 flash → 走 responsesCompletion', async () => {
+    responsesCompletion.mockResolvedValue({
+      content: '',
+      finishReason: 'tool_calls',
+      webSearchCalls: [{ id: 'ws_1', status: 'in_progress', action: { type: 'search', queries: ['q'] } }],
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    });
+    const transport = new DeepSeekTransport();
+    const res = await transport.chat([{ role: 'user', content: '搜一下' }], wsTools);
+
+    expect(responsesCompletion).toHaveBeenCalledTimes(1);
+    expect(chatCompletion).not.toHaveBeenCalled();
+    // 纯搜索轮 → 虚拟化为伪 tool_call（run-loop 无感闭环）
+    expect(res.choices[0].finish_reason).toBe('tool_calls');
+    expect(res.choices[0].message.content).toBeNull();
+    expect(res.choices[0].message.tool_calls).toEqual([
+      { id: 'ws_1', type: 'function', function: { name: 'web_search', arguments: '{}' } },
+    ]);
+    expect(res.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it('搜索自动完成（web_search + message）→ 直接 final 内容', async () => {
+    responsesCompletion.mockResolvedValue({
+      content: '决赛在美国举行',
+      reasoningContent: '思考',
+      finishReason: 'stop',
+      webSearchCalls: [{ id: 'ws_1', status: 'completed', action: { type: 'search', queries: ['q'] } }],
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    });
+    const transport = new DeepSeekTransport();
+    const res = await transport.chat([{ role: 'user', content: '搜一下' }], wsTools);
+
+    expect(res.choices[0].message.content).toBe('决赛在美国举行');
+    expect(res.choices[0].message.reasoning_content).toBe('思考');
+    expect(res.choices[0].finish_reason).toBe('stop');
+  });
+
+  it('pro 模型兜底：web_search 从工具列表滤除，走 chat/completions', async () => {
+    settingsModel = 'deepseek-v4-pro';
+    chatCompletion.mockResolvedValue({
+      content: '好的',
+      finishReason: 'stop',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    const transport = new DeepSeekTransport();
+    const res = await transport.chat([{ role: 'user', content: 'hi' }], wsTools);
+
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    expect(responsesCompletion).not.toHaveBeenCalled();
+    const req = chatCompletion.mock.calls[0][0] as { tools?: unknown[] };
+    expect(req.tools).toEqual([]);
+    expect(res.choices[0].message.content).toBe('好的');
+  });
+
+  it('流式：纯搜索轮在 usage 收尾时虚拟化伪 tool_call', async () => {
+    responsesStream.mockImplementation(async (_req: unknown, _cache: unknown, onChunk: (c: unknown) => void) => {
+      onChunk({ content: '', finishReason: null, searchStatus: 'searching' });
+      onChunk({ content: '', finishReason: null, searchStatus: 'completed' });
+      onChunk({
+        content: '',
+        finishReason: 'tool_calls',
+        webSearchCalls: [{ id: 'ws_1', status: 'in_progress', action: { type: 'search', queries: ['q'] } }],
+        usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 },
+      });
+    });
+    const transport = new DeepSeekTransport();
+    const chunks: string[] = [];
+    let sawSearching = false;
+    for await (const chunk of transport.chatStream([{ role: 'user', content: 'hi' }], wsTools)) {
+      chunks.push(chunk.type);
+      if (chunk.type === 'search_status' && chunk.status === 'searching') sawSearching = true;
+      if (chunk.type === 'tool_call_delta') {
+        expect(chunk.name).toBe('web_search');
+        expect(chunk.id).toBe('ws_1');
+        expect(chunk.arguments).toBe('{}');
+      }
+    }
+    expect(sawSearching).toBe(true);
+    expect(chunks).toEqual(['search_status', 'search_status', 'tool_call_delta', 'done']);
+  });
+
+  it('流式：搜索自动完成（web_search + message）→ 文本增量 + done', async () => {
+    responsesStream.mockImplementation(async (_req: unknown, _cache: unknown, onChunk: (c: unknown) => void) => {
+      onChunk({ content: '决赛在', finishReason: null });
+      onChunk({ content: '美国', finishReason: null });
+      onChunk({ content: '', finishReason: 'stop', usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 } });
+    });
+    const transport = new DeepSeekTransport();
+    const chunks: string[] = [];
+    let text = '';
+    for await (const chunk of transport.chatStream([{ role: 'user', content: 'hi' }], wsTools)) {
+      chunks.push(chunk.type);
+      if (chunk.type === 'text_delta') text += chunk.content;
+    }
+    expect(text).toBe('决赛在美国');
+    expect(chunks).toEqual(['text_delta', 'text_delta', 'done']);
+  });
+
+  it('web_search tool_call 消息回传时序列化为 web_search 类型（原样回传）', async () => {
+    responsesCompletion.mockResolvedValue({
+      content: '',
+      finishReason: 'tool_calls',
+      webSearchCalls: [{ id: 'ws_1', status: 'in_progress', action: { type: 'search', queries: ['q'] } }],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    const transport = new DeepSeekTransport();
+    // 第二轮：回传上一轮的 assistant(web_search) + tool 结果
+    await transport.chat(
+      [
+        { role: 'user', content: '搜一下' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'ws_1', name: 'web_search', arguments: {} }],
+        },
+        { role: 'tool', content: '{"ok":true}', tool_call_id: 'ws_1' },
+      ],
+      wsTools,
+    );
+    const req = responsesCompletion.mock.calls[0][0] as { messages: Array<Record<string, unknown>> };
+    // assistant 消息的 web_search tool_call 保留（transport 层不丢弃，转换在 llm-client 完成）
+    expect(req.messages[1].tool_calls).toEqual([{ id: 'ws_1', type: 'web_search' }]);
   });
 });

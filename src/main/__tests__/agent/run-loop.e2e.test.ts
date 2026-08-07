@@ -175,7 +175,7 @@ describe('E2E — chat（讨论，只读）', () => {
     expect(result.toolCallCount).toBe(1);
   });
 
-  it('chat 任务的模型输入不包含任何写入工具（物理隔离）', async () => {
+  it('chat 任务的模型输入不包含任何写入工具（物理隔离）；包含服务端联网搜索', async () => {
     const { runtime } = setup([{ type: 'final', answer: '好', usage: usage(1, 1) }]);
     const recording = new RecordingAdapter(new ScriptedModelAdapter());
     const chatRuntime = createAgentRuntime(runtime.workspace, recording);
@@ -183,8 +183,57 @@ describe('E2E — chat（讨论，只读）', () => {
     const toolNames = recording.inputs[0].tools?.map((t) => t.name) ?? [];
     expect(toolNames).toEqual([
       'search_nodes', 'search_conversation', 'read_node', 'read_draft', 'list_nodes',
-      'read_asset', 'list_assets', 'list_attachments', 'read_attachment', 'read_visible_view',
+      'read_asset', 'list_assets', 'list_attachments', 'read_attachment', 'list_all_attachments', 'read_any_attachment', 'read_visible_view',
+      'web_search',
     ]);
+  });
+
+  it('附件范围（Part 2）：上下文消息引用的附件可读；未引用的越界拒绝', async () => {
+    const { projectDir } = makeProject('测试项目');
+    tempDirs.push(projectDir);
+    const workspace = ProjectWorkspace.open(projectDir)!;
+    const inScope = workspace.attachments.createAttachment('本会话附件', 'A', 'pasted');
+    const outOfScope = workspace.attachments.createAttachment('别的会话附件', 'B', 'pasted');
+    const runtime = createAgentRuntime(workspace, new ScriptedModelAdapter([
+      {
+        type: 'tool_calls',
+        toolCalls: [
+          toolCall('c1', 'read_attachment', { attachmentId: inScope.id }),
+          toolCall('c2', 'read_attachment', { attachmentId: outOfScope.id }),
+        ],
+        usage: usage(10, 2),
+      },
+      { type: 'final', answer: '完成', usage: usage(20, 5) },
+    ]));
+    const refMessage: ChatMessage = {
+      id: 'm1',
+      role: 'user',
+      content: `（附件：${inScope.name}）`,
+      timestamp: 't',
+      refs: { attachmentIds: [inScope.id] },
+    };
+
+    const traceStatus: Record<string, string> = {};
+    const result = await runtime.coordinator.run({
+      taskKind: 'chat',
+      messages: [refMessage],
+      onToolTrace: (t) => { traceStatus[t.args.attachmentId as string] = t.status; },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(traceStatus[inScope.id]).toBe('completed');
+    expect(traceStatus[outOfScope.id]).toBe('failed');
+    // 越界读取失败的原因：范围外拒绝（模型看到失败结果，附提示信息）
+    const aiMsg = workspace.conversation.readMessages().find((m) => m.role === 'ai')!;
+    const failedTrace = aiMsg.toolTrace!.find((t) => t.args.attachmentId === outOfScope.id)!;
+    expect(failedTrace.error).toContain('不在当前会话范围内');
+    // 删除会话后（日志不再引用）→ 同样越界：证明附件不随会话可见
+    const deletedAtt = workspace.attachments.createAttachment('已删会话附件', 'C', 'pasted');
+    const blocked = await runtime.registry.get('read_attachment')!.execute(
+      { projectDir: workspace.dir, runId: 'r', recordChange: () => {}, attachmentScope: new Set([inScope.id]) },
+      { attachmentId: deletedAtt.id },
+    );
+    expect(blocked.ok).toBe(false);
   });
 
   it('parentMessageId：运行事件与 AI 回答挂入消息树；结束事件挂在回答下（§3.2 活动路径）', async () => {
@@ -234,11 +283,11 @@ describe('E2E — organize（写入 + 变更摘要 + 回滚/接受）', () => {
         userMessage('m2', '他住在青石镇'),
         userMessage('m3', '第一幕在码头'),
       ],
-      advanceCursorTo: 'm3',
     });
 
     expect(result.error).toBeUndefined();
     expect(result.snapshotId).toBe(result.runId);
+    expect(result.writeToolCalls).toBe(3);
     expect(result.changes).toEqual([
       { action: 'node_created', nodeId: 'v1', parentId: 'overview', title: '第一卷' },
       expect.objectContaining({ action: 'draft_updated', nodeId: 'v1' }),
@@ -250,8 +299,9 @@ describe('E2E — organize（写入 + 变更摘要 + 回滚/接受）', () => {
     expect(workspace.outline.readDraft('v1')).toBe('主角是侦探。');
     expect(workspace.assets.listAssets()[0].content).toBe('侦探');
 
-    // 整理光标推进
-    expect(workspace.conversation.getOrganizeCursor()).toBe('m3');
+    // Part 4：光标推进已上移到 app-service（run-loop 不再触碰光标；沙箱化后日志零新增）
+    expect(workspace.conversation.getOrganizeCursor()).toBe('m1');
+    expect(workspace.conversation.readMessages()).toHaveLength(3);
 
     // 快照 + 变更摘要落盘
     expect(workspace.snapshots.hasSnapshot(result.runId)).toBe(true);
@@ -260,19 +310,14 @@ describe('E2E — organize（写入 + 变更摘要 + 回滚/接受）', () => {
     expect(summary.changes).toHaveLength(3);
     expect(summary.snapshotId).toBe(result.runId);
 
-    // 日志：system 运行结束事件包含范围与结果
-    const sysEnd = workspace.conversation.readMessages().filter((m) => m.role === 'system').at(-1)!;
-    expect(sysEnd.content).toContain('本次范围：第 m2–m3 轮未整理对话');
-    expect(sysEnd.content).toContain('新建大纲节点：第一卷');
-
     // ---- 回滚：全部恢复 ----
     const restored = rollbackRun(workspace, result.runId);
     expect(restored.length).toBeGreaterThan(0);
     expect(workspace.outline.findNode('v1')).toBeNull();
     expect(workspace.outline.readDraft('v1')).toBe('');
     expect(workspace.assets.listAssets()).toEqual([]);
-    // 日志不可变
-    expect(workspace.conversation.readMessages().length).toBe(6);
+    // 日志零新增（organize 沙箱化：不写运行事件、不写 AI 回答，Part 4）
+    expect(workspace.conversation.readMessages().length).toBe(3);
   });
 
   it('接受：保留草稿与设定，清除 aiCreated 标记', async () => {
@@ -297,13 +342,32 @@ describe('E2E — organize（写入 + 变更摘要 + 回滚/接受）', () => {
       taskKind: 'organize',
       messages: [userMessage('m1', '整理')],
       maxTurns: 1,
-      advanceCursorTo: 'm1',
     });
     expect(result.error).toBe('RUN_TURNS_EXCEEDED');
     expect(workspace.conversation.getOrganizeCursor()).toBeUndefined();
     expect(workspace.snapshots.hasSnapshot(result.runId)).toBe(true);
     rollbackRun(workspace, result.runId);
     expect(workspace.outline.findNode('v1')).toBeNull();
+  });
+
+  it('整理硬门禁（Part 4）：未调用任何写入工具 → ORGANIZE_NO_WRITE_TOOL，光标不动', async () => {
+    const { workspace, runtime } = setup([
+      // 只读工具 + 大段分析式回答 = 把整理当讨论
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'read_node', { nodeId: 'overview' })], usage: usage(10, 2) },
+      { type: 'final', answer: '这份设定我逐条看了……请选一个方向往下钻。', usage: usage(20, 5) },
+    ]);
+    workspace.conversation.appendMessage(userMessage('m1', '整理这些讨论'));
+    const result = await runtime.coordinator.run({
+      taskKind: 'organize',
+      messages: [userMessage('m1', '整理这些讨论')],
+    });
+    expect(result.error).toContain('ORGANIZE_NO_WRITE_TOOL');
+    expect(result.writeToolCalls).toBe(0);
+    // 不推进光标（内容保持未整理）；快照仍建（可回滚）
+    expect(workspace.conversation.getOrganizeCursor()).toBeUndefined();
+    expect(workspace.snapshots.hasSnapshot(result.runId)).toBe(true);
+    // 沙箱化：日志零新增
+    expect(workspace.conversation.readMessages()).toHaveLength(1);
   });
 });
 
@@ -434,7 +498,6 @@ describe('E2E — 取消与上限', () => {
       taskKind: 'chat',
       messages: [userMessage('m1', '慢慢想')],
       signal: controller.signal,
-      advanceCursorTo: 'm1',
     });
     setTimeout(() => controller.abort(), 30);
     const result = await promise;

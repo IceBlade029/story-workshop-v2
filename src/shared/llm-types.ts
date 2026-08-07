@@ -34,11 +34,15 @@ export interface LLMMessage {
   content: string | null;
   /** 思维链（DeepSeek V4 思考模式；带 tools 的请求必须回传） */
   reasoning_content?: string;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
+  tool_calls?: Array<
+    | {
+        id: string;
+        type: 'function';
+        function: { name: string; arguments: string };
+      }
+    /** 联网搜索调用（Responses API 原生 web_search；回传时原样转成 web_search_call item） */
+    | { id: string; type: 'web_search' }
+  >;
   tool_call_id?: string;
 }
 
@@ -48,15 +52,26 @@ export interface LLMRequest {
   stream: boolean;
   temperature?: number;
   maxTokens?: number;
-  tools?: Array<{
-    type: 'function';
-    function: { name: string; description: string; parameters: Record<string, unknown> };
-  }>;
-  tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+  tools?: Array<
+    | {
+        type: 'function';
+        function: { name: string; description: string; parameters: Record<string, unknown> };
+      }
+    /** 原生联网搜索工具（服务端执行，仅 Responses API 支持） */
+    | { type: 'web_search' }
+  >;
+  tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } } | { type: 'web_search' };
   /** 思考模式开关（DeepSeek V4；缺省 = 默认开启） */
   thinking?: { type: ThinkingMode };
   /** 思考强度（DeepSeek V4；思考关闭时忽略） */
   reasoningEffort?: ReasoningEffort;
+}
+
+/** Responses API 的 web_search_call 输出 item（回传时需原样保留，服务端自动恢复搜索结果）。 */
+export interface WebSearchCallItem {
+  id: string;
+  status?: string;
+  action: { type: string; queries?: string[] };
 }
 
 export interface LLMResponse {
@@ -70,6 +85,8 @@ export interface LLMResponse {
     type: 'function';
     function: { name: string; arguments: string };
   }>;
+  /** 服务端联网搜索调用（Responses API；回传需原样注入） */
+  webSearchCalls?: WebSearchCallItem[];
   usage: {
     promptTokens: number;
     completionTokens: number;
@@ -88,6 +105,10 @@ export interface LLMStreamChunk {
   }>;
   /** 思维链增量（DeepSeek V4 思考模式，与 content 同级；§思考模式） */
   reasoningContent?: string;
+  /** 服务端联网搜索状态（Responses API 原生 web_search） */
+  searchStatus?: 'searching' | 'completed';
+  /** 流结束时未作为函数工具返回的 web_search_call 原始 item（供虚拟化回传） */
+  webSearchCalls?: WebSearchCallItem[];
   /** 流结束时的 usage（stream_options.include_usage，可选） */
   usage?: {
     promptTokens: number;

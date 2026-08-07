@@ -8,13 +8,19 @@
  * - 事件全部记录进对话日志（system 事件）与工具追踪面板
  *
  * 普通讨论（chat）没有写入工具；一切写入都由明确按钮启动的任务执行。
+ *
+ * 沙箱隔离（ux-review §5.2 修订 + Part 4）：只有 chat 把运行事件与 AI 回答
+ * 写入对话日志；organize / detail_fill / revise 在讨论中零痕迹——运行记录
+ * （conversation/runs/<runId>.json）照常完整落盘。整理任务另设硬门禁：
+ * 未调用任何写入工具即判定失败（ORGANIZE_NO_WRITE_TOOL），防止模型
+ * 把整理任务当讨论执行。
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import type { ModelAdapter, ModelTurn, ModelTurnInput } from './model-types';
 import type { ToolResult, ToolContext } from './tool-types';
 import { ToolRegistry } from './tool-registry';
-import { TASK_DEFINITIONS } from './task-definitions';
+import { TASK_DEFINITIONS, WRITE_TOOL_NAMES } from './task-definitions';
 import { RunRecorder, persistRunSummary, persistRunRecord } from './run-recorder';
 import { generateId } from '../storage/id';
 import type { ProjectWorkspace } from '../storage/workspace';
@@ -44,10 +50,10 @@ export interface RunRequest {
   onChunk?: (chunk: string) => void;
   /** 思维链增量回调（DeepSeek V4 思考模式；UI 思考进度） */
   onReasoning?: (text: string) => void;
+  /** 服务端联网搜索状态回调（Responses API 原生 web_search；UI 搜索进度） */
+  onSearchStatus?: (status: 'searching' | 'completed') => void;
   /** 工具调用追踪回调 */
   onToolTrace?: (trace: ToolCallTrace) => void;
-  /** 成功后推进整理光标到该消息 id（§5.3）；'run_end' = 本次运行的最后一条消息 */
-  advanceCursorTo?: string | 'run_end';
   /** 压缩决策（ux-review §4.7：随 run 记录进调用详情；来自 prepareChatContext） */
   contextInfo?: { anchor: string; summary: string; keptFrom: number; keptRawCount: number };
 }
@@ -58,6 +64,8 @@ export interface RunResult {
   finalAnswer: string;
   turns: number;
   toolCallCount: number;
+  /** 本次调用写入工具的次数（硬门禁：organize 必须至少调用一次写入工具） */
+  writeToolCalls: number;
   usage: { inputTokens: number; outputTokens: number };
   /** 可写任务的快照目录 id（= runId） */
   snapshotId?: string;
@@ -132,11 +140,13 @@ export class RunCoordinator {
     }
 
     /**
-     * 沙箱隔离（ux-review §4.3/§5.2 修订）：只有对话任务（chat / organize）
-     * 把运行事件与 AI 回答写入对话日志；写作任务（detail_fill / revise）在
-     * 讨论中零痕迹——运行记录（conversation/runs/<runId>.json）照常完整落盘。
+     * 沙箱隔离（ux-review §4.3/§5.2 修订 + Part 4）：只有对话任务（chat）
+     * 把运行事件与 AI 回答写入对话日志；整理任务（organize）与写作任务
+     * （detail_fill / revise）在讨论中零痕迹——运行记录（conversation/runs/
+     * <runId>.json）照常完整落盘，organize 结果以瞬态卡片展示（不落日志，
+     * 不污染讨论上下文）。
      */
-    const isConversationTask = request.taskKind === 'chat' || request.taskKind === 'organize';
+    const isConversationTask = request.taskKind === 'chat';
 
     // 运行开始事件（system）——仅对话任务
     if (isConversationTask) {
@@ -156,6 +166,14 @@ export class RunCoordinator {
       if (m.role === 'system') return { role: 'system', content: m.content };
       return { role: 'user', content: m.content };
     });
+    /**
+     * 附件范围（默认会话内读取）：本次 run 上下文消息引用的附件 id。
+     * 被压缩进摘要的消息引用通过摘要消息的 refs 透传（context-compression）。
+     */
+    const attachmentScope = new Set<string>();
+    for (const m of request.messages) {
+      for (const id of m.refs?.attachmentIds ?? []) attachmentScope.add(id);
+    }
     /**
      * 运行内上下文（OpenAI/DeepSeek 工具协议必需）：每一轮的
      * assistant(tool_calls) 消息与其后的 tool 结果必须成对出现，
@@ -209,6 +227,13 @@ export class RunCoordinator {
               if (reasoningStartedAt === null) reasoningStartedAt = Date.now();
               reasoningChunks.push(text);
               request.onReasoning?.(text);
+            } catch {
+              /* 忽略 UI 侧失败 */
+            }
+          },
+          onSearchStatus: (status) => {
+            try {
+              request.onSearchStatus?.(status);
             } catch {
               /* 忽略 UI 侧失败 */
             }
@@ -291,6 +316,7 @@ export class RunCoordinator {
           runId,
           signal: request.signal,
           recordChange: (c) => recorder.record(c),
+          attachmentScope,
         };
         let result: ToolResult;
         try {
@@ -318,6 +344,15 @@ export class RunCoordinator {
 
     if (!error && !cancelled && turns >= maxTurns) {
       error = 'RUN_TURNS_EXCEEDED';
+    }
+
+    // 整理任务硬门禁（Part 4）：未调用任何写入工具 = 未执行整理。
+    // 判定为失败 → 不推进整理光标、记录 status=error，UI 显示错误 + 重试。
+    const writeToolCalls = toolDurations.filter((t) => WRITE_TOOL_NAMES.has(t.name)).length;
+    if (!error && !cancelled && request.taskKind === 'organize' && writeToolCalls === 0) {
+      error =
+        'ORGANIZE_NO_WRITE_TOOL: 整理任务未调用任何写入工具（可能被当成了讨论）。' +
+        '已判定失败，未推进整理光标；请重试，或在附注中明确整理目标。';
     }
 
     // ---- 收尾：落日志（仅对话任务）、摘要、光标 ----
@@ -384,17 +419,16 @@ export class RunCoordinator {
             ? `见本条消息（#${aiMessageId}）`
             : isConversationTask
               ? ''
-              : `已写入运行记录（正文模块 ⓘ 调用详情可查，${finalAnswer.length} 字）`,
+              : `已写入运行记录（ⓘ 调用详情可查，${finalAnswer.length} 字）`,
           error,
         },
         createdAt: new Date().toISOString(),
       });
     }
 
-    // 运行结束事件（仅对话任务；写作任务在讨论中零痕迹）
-    let endMessageId: string | undefined;
+    // 运行结束事件（仅对话任务；organize/写作任务在讨论中零痕迹）
     if (isConversationTask) {
-      endMessageId = generateId('msg');
+      const endMessageId = generateId('msg');
       workspace.conversation.appendMessage({
         id: endMessageId,
         role: 'system',
@@ -411,18 +445,13 @@ export class RunCoordinator {
       });
     }
 
-    // §5.3：任务成功结束后推进整理光标（'run_end' = 本次运行的最后一条消息）
-    if (!error && !cancelled && request.advanceCursorTo && endMessageId) {
-      const target = request.advanceCursorTo === 'run_end' ? endMessageId : request.advanceCursorTo;
-      workspace.conversation.setOrganizeCursor(target);
-    }
-
     return {
       runId,
       taskKind: request.taskKind,
       finalAnswer,
       turns,
       toolCallCount: traces.length,
+      writeToolCalls,
       usage,
       snapshotId,
       changes,

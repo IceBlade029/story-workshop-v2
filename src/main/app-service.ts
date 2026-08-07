@@ -43,11 +43,20 @@ export interface AppRunHooks {
   onChunk?: (text: string) => void;
   /** 思维链增量（DeepSeek V4 思考模式；UI 思考进度） */
   onReasoning?: (text: string) => void;
+  /** 服务端联网搜索状态（Responses API 原生 web_search；UI 搜索进度） */
+  onSearchStatus?: (status: 'searching' | 'completed') => void;
   onToolTrace?: (trace: ToolCallTrace) => void;
 }
 
 /** run 结果；无内容可整理时 skippedReason 非空 */
 export type AppRunResult = RunResult & { skippedReason?: string };
+
+/**
+ * 附件正文内联上限（字符）：首次回答上下文把附件正文直接注入消息（ChatGPT/
+ * DeepSeek 式，保证首轮不因未读附件而幻觉）。超过上限不内联，由系统提示
+ * 硬性要求模型先 read_attachment 读取。
+ */
+const MAX_INLINE_ATTACHMENT_CHARS = 12000;
 
 export class AppService {
   private runtime: AgentRuntime | null = null;
@@ -95,6 +104,20 @@ export class AppService {
   closeProject(): void {
     this.runtime = null;
     this.model = null;
+  }
+
+  /**
+   * 删除项目（显式操作，确认后移到系统回收站）：校验目录确实是项目
+   * （含 project.json），若为当前打开项目则先关闭。实际删除（回收站）
+   * 由调用方（ipc 层）执行，这里保持与 electron 解耦。
+   */
+  deleteProject(dir: string): { wasOpen: boolean } {
+    const fs = require('fs') as typeof import('fs');
+    const metaFile = path.join(dir, 'project.json');
+    if (!fs.existsSync(metaFile)) throw new Error(`NOT_A_PROJECT: ${dir}`);
+    const wasOpen = this.runtime !== null && this.dir === dir;
+    if (wasOpen) this.closeProject();
+    return { wasOpen };
   }
 
   /** 从目录名推断可展示的项目信息（用于项目列表）。 */
@@ -368,6 +391,19 @@ export class AppService {
     }
   }
 
+  /** 只读项目顶层文本文件（待发送附件预读用）；系统目录/保留文件返回 null。 */
+  readWorkspaceFile(name: string): { name: string; content: string } | null {
+    const fs = require('fs') as typeof import('fs');
+    const available = new Set(this.scanWorkspaceFiles().map((f) => f.name));
+    if (!available.has(name)) return null;
+    const file = path.join(this.dir, name);
+    try {
+      return { name, content: fs.readFileSync(file, 'utf-8') };
+    } catch {
+      return null;
+    }
+  }
+
   /** 把项目文件夹中的文件收纳为附件（内容复制进 attachments/，原文件不移动不删除；§3.1）。 */
   importWorkspaceFiles(names: string[]): ProjectState {
     const ws = this.workspace;
@@ -398,6 +434,12 @@ export class AppService {
     const read = this.workspace.attachments.readAttachment(attachmentId);
     if (!read) return null;
     return { name: read.meta.name, content: read.content };
+  }
+
+  /** 删除附件（显式操作，确认后永久删除）：附件是项目一等对象，删除与任何会话无关。 */
+  deleteAttachment(attachmentId: string): ProjectState {
+    this.workspace.attachments.deleteAttachment(attachmentId);
+    return this.getState();
   }
 
   // -------------------------------------------------------------- 可见视图（§6）
@@ -448,13 +490,49 @@ export class AppService {
   }
 
   /**
+   * 一次提交「文本 + 待发送附件」（ChatGPT 式：附件先在输入框上方暂存，
+   * 发送时才落盘进对话）。逐个附件持久化并追加引用消息（日志只存引用，
+   * §3.1），再追加用户文本消息。内容为空且无附件 → 抛 EMPTY_SEND。
+   */
+  sendWithAttachments(content: string, attachments: Array<{ name: string; content: string; source?: Attachment['source'] }>): ProjectState {
+    const ws = this.workspace;
+    if (this.isActiveSessionArchived()) throw new Error('SESSION_ARCHIVED');
+    const text = content.trim();
+    if (text === '' && attachments.length === 0) throw new Error('EMPTY_SEND');
+    const now = new Date().toISOString();
+    for (const a of attachments) {
+      const attachment = ws.attachments.createAttachment(a.name, a.content, a.source ?? 'uploaded');
+      ws.conversation.appendMessage({
+        id: generateId('msg'),
+        role: 'user',
+        content: `（附件：${a.name}）`,
+        timestamp: now,
+        refs: { attachmentIds: [attachment.id] },
+      });
+    }
+    if (text !== '') {
+      ws.conversation.appendMessage({
+        id: generateId('msg'),
+        role: 'user',
+        content: text,
+        timestamp: now,
+      });
+    }
+    return this.getState();
+  }
+
+  /**
    * 开启新话题（ux-review §4.5）：新建空会话并设为活动。
    * 不归档、不删除当前话题——旧话题保持活跃，可随时切回继续追加。
    * 自动命名「话题 N」（可传 title 覆盖）。
+   * 用户反馈：当前话题为空（尚无任何消息）时不允许新建话题。
    */
   newTopic(title?: string): ProjectState {
     const ws = this.workspace;
     ws.conversation.ensureInitialSession();
+    const sid = ws.conversation.getActiveSessionId();
+    const session = sid ? ws.conversation.getSession(sid) : null;
+    if (session && !session.tailMessageId) throw new Error('TOPIC_EMPTY');
     ws.conversation.createSession(title?.trim() || undefined);
     return this.getState();
   }
@@ -498,7 +576,7 @@ export class AppService {
   // -------------------------------------------------------------- run
 
   /** 组装 organize 范围（ux-review §4.2：范围 = 未整理 / 全部 + 自然语言附注）。 */
-  private resolveOrganizeScope(scope: OrganizeScope): { messages: ChatMessage[]; scopeText: string; advanceCursorTo?: string | 'run_end' } {
+  private resolveOrganizeScope(scope: OrganizeScope): { messages: ChatMessage[]; scopeText: string } {
     const conv = this.workspace.conversation;
     if (scope.type === 'unorganized') {
       const messages = conv.readUnorganizedMessages();
@@ -506,16 +584,11 @@ export class AppService {
       const scopeText = cursor
         ? `第 ${conv.readActivePath().findIndex((m) => m.id === cursor) + 1}–${conv.readActivePath().length} 轮未整理对话（光标：#${cursor}）`
         : `全部未整理对话（无光标）`;
-      return {
-        messages,
-        scopeText,
-        // 光标推进到本次运行的最后一条消息（运行事件也算已消化，§5.3）
-        advanceCursorTo: 'run_end',
-      };
+      return { messages, scopeText };
     }
     // 'all'：重新整理全部对话
     const messages = conv.readMessages();
-    return { messages, scopeText: '重新整理全部对话（全部历史）', advanceCursorTo: 'run_end' };
+    return { messages, scopeText: '重新整理全部对话（全部历史）' };
   }
 
   /** 启动一次 run（chat / organize），返回结果；无内容可整理时 skippedReason。 */
@@ -527,19 +600,20 @@ export class AppService {
 
     let request: RunRequest;
     if (req.kind === 'organize') {
-      const { messages, scopeText, advanceCursorTo } = this.resolveOrganizeScope(req.scope ?? { type: 'unorganized' });
+      const { messages, scopeText } = this.resolveOrganizeScope(req.scope ?? { type: 'unorganized' });
       if (messages.length === 0) {
-        return { runId: '', taskKind: 'organize', finalAnswer: '', turns: 0, toolCallCount: 0, usage: { inputTokens: 0, outputTokens: 0 }, changes: [], cancelled: false, skippedReason: '没有未整理的内容' };
+        return { runId: '', taskKind: 'organize', finalAnswer: '', turns: 0, toolCallCount: 0, writeToolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, changes: [], cancelled: false, skippedReason: '没有未整理的内容' };
       }
       request = {
         taskKind: 'organize',
-        messages,
+        // Part 5：范围消息同样内联附件正文，organize 首轮即可读取
+        messages: this.prepareModelMessages(messages),
         scope: scopeText + (req.note ? `；附注：${req.note}` : ''),
-        advanceCursorTo,
       };
     } else {
       // §7.2 上下文组装：压缩摘要（沿活动路径）+ 最近几轮原文 + 当前输入
-      const path = ws.conversation.readActivePath();
+      // Part 5：先内联附件正文（内存视图，token 预算在 planCompression 前正确计入）
+      const path = this.prepareModelMessages(ws.conversation.readActivePath());
       const ctx = await this.prepareChatContext(path);
       if (ctx.eventText) this.appendSystemEvent(ctx.eventText, path.at(-1)?.id);
       else if (ctx.failureText) this.appendSystemEvent(ctx.failureText, path.at(-1)?.id);
@@ -556,6 +630,7 @@ export class AppService {
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
+      onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
     // AI 写入（organize 的 write_draft）后同步可见视图新鲜度（§6.3 自动重生成）
@@ -564,6 +639,10 @@ export class AppService {
     ws.snapshots.pruneRetention();
     // §4.3：整理范围消化过的附件记录所用 hash（附件后变 → 附件行提示「已更新」）
     if (req.kind === 'organize' && !result.error && !result.cancelled) {
+      // 整理成功（含硬门禁通过）→ 光标推进到范围最后一条消息（§5.3；
+      // organize 沙箱化后日志零新增，光标不再指向运行结束事件）
+      const scopeTail = request.messages.at(-1)?.id;
+      if (scopeTail) ws.conversation.setOrganizeCursor(scopeTail);
       const marked = new Set<string>();
       for (const m of request.messages) {
         for (const id of m.refs?.attachmentIds ?? []) {
@@ -574,7 +653,95 @@ export class AppService {
         }
       }
     }
+    // 用户反馈 2：首个对话 run 完成后自动命名会话标题（ChatGPT/DeepSeek 式）；
+    // 命名失败静默保留「话题 N」占位，下次 chat run 自动重试。
+    if (req.kind === 'chat' && !result.error && !result.cancelled) {
+      const sid = ws.conversation.getActiveSessionId();
+      if (sid) {
+        try {
+          await this.autoTitleSession(sid);
+        } catch {
+          /* 命名失败不阻断 run 结果 */
+        }
+      }
+    }
     return result;
+  }
+
+  /**
+   * AI 自动命名（用户反馈 2）：根据会话首条用户消息生成简短标题，
+   * 替换「话题 N」占位。单轮只读模型调用（无工具），成功后写入
+   * setSessionTitle（titleAuto=false）；失败抛错由调用方静默处理。
+   */
+  private async autoTitleSession(sessionId: string): Promise<void> {
+    const ws = this.workspace;
+    const session = ws.conversation.getSession(sessionId);
+    if (!session || !session.titleAuto || !this.model) return;
+    const byId = new Map(ws.conversation.readMessages().map((m) => [m.id, m]));
+    let firstUser: string | undefined;
+    let current = session.tailMessageId ? byId.get(session.tailMessageId) : undefined;
+    while (current) {
+      if (current.role === 'user') {
+        firstUser = current.content;
+        break;
+      }
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    if (!firstUser) return;
+    const turn = await this.model.runTurn(
+      {
+        systemPrompt: '你是对话标题生成器。为下面的故事创作讨论生成一个简短的中文会话标题（不超过 16 字，直指主题；只输出标题本身，不要引号、冒号或解释）。',
+        messages: [{ role: 'user', content: `讨论内容：\n${firstUser.slice(0, 500)}` }],
+      },
+      { maxTokens: 64 },
+    );
+    if (turn.type !== 'final') return;
+    const title = turn.answer
+      .trim()
+      .replace(/^["'「『“]+/, '')
+      .replace(/["'」』”]+$/, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 24);
+    if (title) ws.conversation.setSessionTitle(sessionId, title);
+  }
+
+  /**
+   * 模型消息预处理（Part 5）：把带附件引用的消息展开为正文内联的内存副本
+   * （不写日志、不改原消息），并剔除「（消息已编辑）原内容：…」记账事件
+   * （旧文本不进模型上下文——编辑后的新版本才是权威内容；存量日志兜底）。
+   * 附件 ≤ MAX_INLINE_ATTACHMENT_CHARS 直接注入正文，保证模型首轮就能看到
+   * 内容（消除「未读附件就回答」的幻觉）；超限不内联，提示必须
+   * read_attachment；附件已删除时提示缺失。在 planCompression 之前调用，
+   * token 预算正确计入。
+   */
+  private prepareModelMessages(messages: ChatMessage[]): ChatMessage[] {
+    const ws = this.workspace;
+    const out: ChatMessage[] = [];
+    for (const m of messages) {
+      if (m.role === 'system' && m.content.startsWith('（消息已编辑）')) continue;
+      const ids = m.refs?.attachmentIds;
+      if (!ids || ids.length === 0) {
+        out.push(m);
+        continue;
+      }
+      const parts: string[] = [];
+      for (const id of ids) {
+        const read = ws.attachments.readAttachment(id);
+        if (!read) {
+          parts.push(`（附件已被删除：${id}）`);
+          continue;
+        }
+        const { meta, content } = read;
+        const name = meta.name;
+        if (content.length <= MAX_INLINE_ATTACHMENT_CHARS) {
+          parts.push(`（附件：${name}）\n【附件正文（${content.length} 字）】\n${content}\n【附件正文结束】`);
+        } else {
+          parts.push(`（附件：${name}）\n（正文 ${content.length} 字，过大未内联；回答前必须先调用 read_attachment 读取完整正文）`);
+        }
+      }
+      out.push(parts.length === 0 ? m : { ...m, content: parts.join('\n\n') });
+    }
+    return out;
   }
 
   /**
@@ -590,10 +757,12 @@ export class AppService {
     if (!plan.needsCompression || !plan.anchor) return { messages: path };
     const anchor = plan.anchor;
     const keptCount = path.length - plan.keptFrom;
+    // 被压缩前缀引用的附件 id（透传给摘要消息 → 本轮附件范围不丢，Part 2）
+    const compressedRefs = { attachmentIds: [...new Set(path.slice(0, plan.keptFrom).flatMap((m) => m.refs?.attachmentIds ?? []))] };
     const existing = ws.conversation.readBranchSummary(anchor);
     if (existing) {
       return {
-        messages: [summaryMessage(anchor, existing), ...path.slice(plan.keptFrom)],
+        messages: [summaryMessage(anchor, existing, compressedRefs), ...path.slice(plan.keptFrom)],
         contextInfo: { anchor, summary: existing, keptFrom: plan.keptFrom, keptRawCount: keptCount },
       };
     }
@@ -607,7 +776,7 @@ export class AppService {
     }
     ws.conversation.writeBranchSummary(anchor, outcome.summary!);
     return {
-      messages: [summaryMessage(anchor, outcome.summary!), ...path.slice(plan.keptFrom)],
+      messages: [summaryMessage(anchor, outcome.summary!, compressedRefs), ...path.slice(plan.keptFrom)],
       eventText: `已压缩较早的讨论上下文（覆盖第 1–${plan.keptFrom} 条消息，最近 ${keptCount} 条保留原文）`,
       contextInfo: { anchor, summary: outcome.summary!, keptFrom: plan.keptFrom, keptRawCount: keptCount },
     };
@@ -616,7 +785,8 @@ export class AppService {
   /** 上下文视图（§7.3 只读透明度工具）：展示一次模型调用实际收到什么。 */
   inspectContext(): import('../shared/ipc-types').ContextInspection {
     const ws = this.workspace;
-    const path = ws.conversation.readActivePath();
+    // Part 5：与实际调用一致，先内联附件正文再估算
+    const path = this.prepareModelMessages(ws.conversation.readActivePath());
     const plan = planCompression(ws, path);
     const summary = plan.anchor ? ws.conversation.readBranchSummary(plan.anchor) : '';
     return {
@@ -718,6 +888,7 @@ export class AppService {
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
+      onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
   }
@@ -744,8 +915,8 @@ export class AppService {
       context.push(...reversed);
     }
     if (!this.runtime) throw new Error('NO_PROJECT_OPEN');
-    // 刷新同样走压缩组装（§7.2）
-    const ctx = await this.prepareChatContext(context);
+    // 刷新同样走压缩组装（§7.2）；Part 5：附件正文先内联
+    const ctx = await this.prepareChatContext(this.prepareModelMessages(context));
     if (ctx.eventText) this.appendSystemEvent(ctx.eventText, context.at(-1)?.id);
     else if (ctx.failureText) this.appendSystemEvent(ctx.failureText, context.at(-1)?.id);
     return this.runtime.coordinator.run({
@@ -756,6 +927,7 @@ export class AppService {
       contextInfo: ctx.contextInfo,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
+      onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
   }
@@ -820,6 +992,7 @@ export class AppService {
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
+      onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
   }

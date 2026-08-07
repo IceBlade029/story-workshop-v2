@@ -154,6 +154,54 @@ describe('conversation-repository — 消息树（§3.2 时间线控制）', () 
     expect(conv.getMessage('m2')?.supersededBy).toBeUndefined(); // 原始读取无派生字段
   });
 
+  it('版本派生（DeepSeek 式 ◀ i/N ▶）：versionGroupId / versionIndex / versionCount 按链与日志顺序', () => {
+    const { conv, projectDir } = makeConversation();
+    conv.appendMessage({ ...msg('m1', 'user', '写个开头'), timestamp: 't' });
+    conv.appendMessage({ ...msg('m2', 'ai', '回答 v1'), timestamp: 't', parentId: 'm1' });
+    // 刷新 → v2 取代 v1
+    conv.appendMessage({ ...msg('m3', 'ai', '回答 v2'), timestamp: 't', parentId: 'm1', supersedesId: 'm2' });
+    // 编辑用户消息 m1 → m4 取代 m1
+    conv.appendMessage({ ...msg('m4', 'user', '写个开头（改）'), timestamp: 't', supersedesId: 'm1' });
+    const tree = conv.readMessagesWithTree();
+    const byId = new Map(tree.map((m) => [m.id, m]));
+    // m1/m4 同组：1/2、2/2；m2/m3 同组：1/2、2/2
+    expect(byId.get('m1')!).toMatchObject({ versionGroupId: 'm1', versionIndex: 1, versionCount: 2 });
+    expect(byId.get('m4')!).toMatchObject({ versionGroupId: 'm1', versionIndex: 2, versionCount: 2 });
+    expect(byId.get('m2')!).toMatchObject({ versionGroupId: 'm2', versionIndex: 1, versionCount: 2 });
+    expect(byId.get('m3')!).toMatchObject({ versionGroupId: 'm2', versionIndex: 2, versionCount: 2 });
+    // 普通消息（无取代关系）：组 = 自身，1/1
+    const raw = conv.readMessages();
+    expect(raw).toHaveLength(4);
+    // 派生字段不落盘
+    const file = fs.readFileSync(path.join(projectDir, 'conversation', 'history.jsonl'), 'utf-8');
+    expect(file).not.toContain('versionIndex');
+  });
+
+  it('setActiveMessage 落到最深续写尾（切回版本看到完整续写链）', () => {
+    const { conv } = makeConversation();
+    conv.appendMessage({ ...msg('m1', 'user', '一'), timestamp: 't' });
+    conv.appendMessage({ ...msg('m2', 'ai', '二'), timestamp: 't', parentId: 'm1' });
+    conv.appendMessage({ ...msg('m3', 'user', '三'), timestamp: 't', parentId: 'm2' });
+    // 切到 m2（有续写 m3）→ 活动末端 = m3（最深续写尾），路径包含完整续写链
+    conv.setActiveMessage('m2');
+    expect(conv.readActivePath().map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+    // 切到根 m1 → 同样落到最深的 m3
+    conv.setActiveMessage('m1');
+    expect(conv.readActivePath().map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('编辑根级消息：替换保持根级（旧版本不成为新版本的父亲，旧文本不进活动路径）', () => {
+    const { conv } = makeConversation();
+    conv.appendMessage({ ...msg('m1', 'user', '原始问题'), timestamp: 't' });
+    conv.appendMessage({ ...msg('m2', 'ai', '回答'), timestamp: 't', parentId: 'm1' });
+    const replacement = conv.editMessage('m1', '修改后的问题');
+    expect(replacement.parentId).toBeUndefined(); // 根级替换保持根级
+    expect(replacement.supersedesId).toBe('m1');
+    // 活动路径 = 新版本，不含旧文本（m1 是兄弟版本，不在路径上）
+    expect(conv.readActivePath().map((m) => m.id)).toEqual([replacement.id]);
+    expect(conv.getActiveMessageId()).toBe(replacement.id);
+  });
+
   it('readActivePath 沿 parentId 链回溯；未设活动末端时回退到最新消息', () => {
     const { conv } = makeConversation();
     conv.appendMessage({ ...msg('m1', 'user', '一'), timestamp: 't' });
@@ -195,12 +243,14 @@ describe('conversation-repository — 会话（ux-review §4.5 ChatGPT 式）', 
     expect(conv.getActiveSessionId()).toMatch(/^sess_/);
     const s1 = conv.getSession(conv.getActiveSessionId()!)!;
     expect(s1.title).toBe('话题一');
+    expect(s1.titleAuto).toBe(true); // 占位标题 → 首个 chat run 后由 AI 自动命名
     expect(s1.tailMessageId).toBe('m2');
     expect(s1.rootMessageId).toBe('m1');
     // 新话题：不归档当前，建空会话（tail 未定）→ 活动路径为空
     const s2 = conv.createSession();
     expect(conv.listSessions()).toHaveLength(2);
     expect(s2.tailMessageId).toBeUndefined();
+    expect(s2.titleAuto).toBe(true);
     expect(conv.getActiveSessionId()).toBe(s2.id);
     expect(conv.readActivePath()).toEqual([]);
     // 新话题首条消息：根级（不挂旧话题尾部），懒记 root/tail
@@ -209,6 +259,10 @@ describe('conversation-repository — 会话（ux-review §4.5 ChatGPT 式）', 
     expect(s2b.tailMessageId).toBe('m3');
     expect(s2b.rootMessageId).toBe('m3');
     expect(conv.readActivePath().map((m) => m.id)).toEqual(['m3']);
+    // AI 自动命名：写入标题并清除占位标记（用户反馈 2）
+    conv.setSessionTitle(s2.id, '青石镇侦探');
+    expect(conv.getSession(s2.id)!.title).toBe('青石镇侦探');
+    expect(conv.getSession(s2.id)!.titleAuto).toBeFalsy();
   });
 
   it('switchSession 切到会话 tail；空会话 → 空路径；归档/取消归档', () => {
