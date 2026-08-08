@@ -24,11 +24,13 @@ import { Workspace } from './components/Workspace';
 import { WritingModule } from './components/WritingModule';
 import { SettingsDialog } from './components/ui/SettingsDialog';
 import { ThemePicker } from './components/ui/ThemePicker';
+import { ThemeBackdrop } from './components/ui/ThemeBackdrop';
 import { GlobalSearchDialog } from './components/ui/GlobalSearchDialog';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { DialogHost } from './components/ui/dialog';
 import { applyTheme } from './theme';
 import './styles.css';
+import './theme-decorations.css';
 
 const MIN_LEFT = 180;
 const MAX_LEFT = 480;
@@ -385,6 +387,7 @@ function App(): React.ReactElement {
   return (
     <ErrorBoundary>
       <div className="app">
+        <ThemeBackdrop />
         {!project ? (
           <ProjectScreen />
         ) : (

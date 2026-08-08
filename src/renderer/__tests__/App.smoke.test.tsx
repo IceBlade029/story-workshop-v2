@@ -556,6 +556,16 @@ describe('主题系统 — 切换持久化（data-theme + localStorage 镜像 + 
     window.localStorage.removeItem('sw2:theme');
   });
 
+  it('挂载无语义主题装饰层；默认主题由 CSS 保持隐藏', async () => {
+    setApiForTest(makeApi());
+    store.reset();
+    await renderApp();
+    const backdrop = document.querySelector('.theme-backdrop');
+    expect(backdrop).toBeTruthy();
+    expect(backdrop?.getAttribute('aria-hidden')).toBe('true');
+    expect(backdrop?.querySelectorAll('.theme-ornament')).toHaveLength(3);
+  });
+
   it('顶栏 🎨：打开浮层 → 点星云夜航 → data-theme / 镜像 / settings.update 全生效', async () => {
     const api = makeApi();
     const update = vi.fn(async () => makeProjectState());
@@ -583,6 +593,16 @@ describe('主题系统 — 切换持久化（data-theme + localStorage 镜像 + 
     expect(window.localStorage.getItem('sw2:theme')).toBe('nebula');
     // 浮层已关闭
     expect(screen.queryByText('外观主题')).toBeNull();
+
+    // 设置弹窗必须脱离带 backdrop-filter 的星云顶栏，否则 fixed 会以 44px 顶栏为定位基准。
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('设置（弹窗）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const settingsOverlay = document.querySelector('.dialog-overlay');
+    expect(settingsOverlay).toBeTruthy();
+    expect(settingsOverlay?.parentElement).toBe(document.body);
+    expect(settingsOverlay?.closest('.topbar')).toBeNull();
   });
 
   it('项目首页（无项目）也可切换主题；不影响创建项目流程', async () => {

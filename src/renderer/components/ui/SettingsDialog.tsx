@@ -3,6 +3,7 @@
  * 全局配置不属于创作上下文，不占右栏、不占模块位）。
  */
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { store, useStore } from '../../store';
 import { THEMES } from '../../theme';
 import type { AppSettings, ThemeId } from '../../../shared/llm-types';
@@ -26,7 +27,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
     }
   };
 
-  return (
+  return createPortal(
     <div className="dialog-overlay" onClick={onClose}>
       <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
         <h3 className="dialog-title">设置</h3>
@@ -51,7 +52,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
             </div>
 
             <div className="ws-head" style={{ marginTop: 8 }}><h3>外观</h3></div>
-            <p className="muted small">主题只改界面配色，不影响正文内容；单击卡片即刻应用。</p>
+            <p className="muted small">主题会改变界面配色、装饰与动效，不影响正文内容；单击卡片即刻应用。</p>
             <div className="theme-grid">
               {THEMES.map((t) => (
                 <button
@@ -61,7 +62,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
                   title={t.available ? undefined : '即将推出'}
                   onClick={() => void update({ theme: t.id as ThemeId })}
                 >
-                  <span className="theme-card-thumb" style={{ background: t.thumb.bg }}>
+                  <span className={`theme-card-thumb theme-card-thumb-${t.id}`} style={{ background: t.thumb.bg }}>
                     <span className="tc-bar" style={{ background: t.thumb.bar, display: 'block', borderBottom: '1px solid rgba(0,0,0,.1)' }} />
                     <span className="tc-body">
                       <span style={{ background: t.thumb.left }} />
@@ -139,6 +140,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
           <button className="small-btn" onClick={onClose}>关闭</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

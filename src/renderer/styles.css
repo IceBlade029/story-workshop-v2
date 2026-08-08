@@ -361,7 +361,7 @@ button { font-family: inherit; }
 input, textarea, select { font-family: inherit; color: var(--text); }
 textarea:focus-visible, input:focus-visible, select:focus-visible { outline: none; }
 
-.app { height: 100vh; display: flex; flex-direction: column; }
+.app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
 /* ============================================================ 顶层形态（ux-review §2） */
 .app-shell { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -745,7 +745,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
 /* 附件选择器（§3.1：上传 / 项目文件分组） */
 .attachment-btn-wrap { position: relative; }
 .attachment-picker {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; min-width: 260px; max-width: 380px;
+  position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 40; min-width: 260px; max-width: 380px;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-m);
   box-shadow: var(--shadow-md); padding: 8px; display: flex; flex-direction: column; gap: 6px;
 }
@@ -829,7 +829,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
 .jump-bottom:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ============================================================ 调用详情弹窗（ux-review §4.7） */
-.dialog-wide { width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
+.dialog.dialog-wide {
+  width: min(720px, 92vw);
+  max-width: 720px;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.dialog-wide .dialog-body { min-height: 0; overflow-y: auto; }
 .inspect-dialog .dialog-body { overflow-y: auto; min-height: 0; }
 .inspect-body { display: flex; flex-direction: column; gap: 10px; }
 .inspect-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -964,7 +972,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
 /* ============================================================ 对话框 */
 .dialog-overlay {
   position: fixed; inset: 0; background: var(--overlay-bg); z-index: 200;
-  display: flex; align-items: center; justify-content: center; padding: 24px;
+  display: flex; align-items: center; justify-content: center; padding: 24px; overflow: hidden;
   animation: dialog-fade .12s ease-out;
 }
 @keyframes dialog-fade { from { opacity: 0; } to { opacity: 1; } }
@@ -975,14 +983,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
   animation: dialog-pop .14s ease-out;
 }
 @keyframes dialog-pop { from { transform: translateY(6px) scale(.99); opacity: 0; } to { transform: none; opacity: 1; } }
-.dialog-title { margin: 0; font-size: 15px; font-weight: 650; }
+.dialog-title { margin: 0; font-size: 15px; font-weight: 650; flex-shrink: 0; }
 .dialog-body { font-size: 13px; line-height: 1.7; color: var(--text-secondary); white-space: pre-wrap; }
 .dialog-body input, .dialog-body textarea {
   width: 100%; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-m);
   font-size: 13px; background: var(--bg-panel);
 }
 .dialog-body input:focus, .dialog-body textarea:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
-.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }
 
 /* ============================================================ 空状态 */
 .empty-state {
