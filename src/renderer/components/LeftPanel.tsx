@@ -304,7 +304,7 @@ function NewAssetForm({ onClose }: { onClose: () => void }): React.ReactElement 
 
 // --------------------------------------------------------------------------- 面板
 
-export function LeftPanel(): React.ReactElement {
+export function LeftPanel({ collapsed }: { collapsed?: boolean }): React.ReactElement {
   const tab = useStore((s) => s.tab);
   const project = useStore((s) => s.project);
   const treeSearch = useStore((s) => s.treeSearch);
@@ -341,7 +341,7 @@ export function LeftPanel(): React.ReactElement {
   };
 
   return (
-    <aside className="left-panel">
+    <aside className={`left-panel${collapsed ? ' collapsed' : ''}`}>
       <div className="tabs">
         <button className={tab === 'outline' ? 'tab active' : 'tab'} onClick={() => switchTab('outline')}>大纲</button>
         <button className={tab === 'assets' ? 'tab active' : 'tab'} onClick={() => switchTab('assets')}>设定{assets.length > 0 ? ` (${assets.length})` : ''}</button>

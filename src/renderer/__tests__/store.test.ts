@@ -3,7 +3,7 @@
  * 用 mock api 验证：活动路径派生、未整理计数、流式事件应用、
  * 子树展开、run 完成后的模式切换。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 import { store, registerEditorGuard } from '../store';
 import { setApiForTest } from '../api';
 import { confirmDiscardDialog } from '../components/ui/dialog';
@@ -18,6 +18,20 @@ vi.mock('../components/ui/dialog', () => ({
 }));
 
 const mockDiscard = confirmDiscardDialog as unknown as ReturnType<typeof vi.fn>;
+
+// 非 jsdom 环境：折叠状态持久化（§6.12）需要 localStorage → 提供内存 stub
+const lsData: Record<string, string> = {};
+beforeAll(() => {
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => lsData[k] ?? null,
+    setItem: (k: string, v: string) => { lsData[k] = v; },
+    removeItem: (k: string) => { delete lsData[k]; },
+    clear: () => { for (const k of Object.keys(lsData)) delete lsData[k]; },
+  });
+});
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
 
 function msg(id: string, role: ChatMessage['role'], content: string, parentId?: string): ChatMessage {
   return { id, role, content, timestamp: 't', parentId };
@@ -497,6 +511,44 @@ describe('store — 项目切换（§6.10）', () => {
     await store.openProject('/proj');
     await store.renameProject('新名');
     expect(store.getState().project?.name).toBe('新名');
+  });
+});
+
+describe('store — 折叠与专注模式（§6.12）', () => {
+  it('左右栏/场景树独立 toggle；专注一键全折全展', () => {
+    store.reset();
+    store.toggleLeftPanel();
+    expect(store.getState().leftCollapsed).toBe(true);
+    expect(store.getState().rightCollapsed).toBe(false);
+    store.toggleRightPanel();
+    store.toggleScenes();
+    expect(store.getState().rightCollapsed).toBe(true);
+    expect(store.getState().scenesCollapsed).toBe(true);
+    // 专注 = 三栏全折叠
+    store.reset();
+    store.toggleFocus();
+    expect(store.getState().leftCollapsed).toBe(true);
+    expect(store.getState().rightCollapsed).toBe(true);
+    expect(store.getState().scenesCollapsed).toBe(true);
+    // 再点一次全展开
+    store.toggleFocus();
+    expect(store.getState().leftCollapsed).toBe(false);
+    expect(store.getState().rightCollapsed).toBe(false);
+    expect(store.getState().scenesCollapsed).toBe(false);
+  });
+
+  it('折叠状态持久化到 localStorage 并可恢复', () => {
+    store.reset();
+    store.toggleLeftPanel();
+    store.toggleScenes();
+    const saved = JSON.parse(localStorage.getItem('sw2:collapsed') ?? '{}') as Record<string, boolean>;
+    expect(saved).toEqual({ left: true, right: false, scenes: true });
+    // 模拟重启：新 store 实例通过 initCollapsed 恢复
+    store.reset();
+    expect(store.getState().leftCollapsed).toBe(false);
+    store.initCollapsed();
+    expect(store.getState().leftCollapsed).toBe(true);
+    expect(store.getState().scenesCollapsed).toBe(true);
   });
 });
 

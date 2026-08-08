@@ -372,7 +372,7 @@ function ProjectOverview(): React.ReactElement {
 // 工作台入口
 // ---------------------------------------------------------------------------
 
-export function Workspace(): React.ReactElement {
+export function Workspace({ collapsed }: { collapsed?: boolean }): React.ReactElement {
   const mode = useStore((s) => s.workspaceMode);
   const selected = useStore((s) => s.selected);
   const viewHistory = useStore((s) => s.viewHistory);
@@ -397,7 +397,7 @@ export function Workspace(): React.ReactElement {
     : undefined;
 
   return (
-    <aside className="workspace">
+    <aside className={`workspace${collapsed ? ' collapsed' : ''}`}>
       {backLabel && (
         <div className="ws-back">
           <button className="tiny-btn" onClick={() => store.viewBack()} title="回到跳转前正在查看的对象（§4.6）">

@@ -178,11 +178,26 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
   min-height: 0;
   position: relative;
 }
-.left-panel { border-right: 1px solid var(--border); background: var(--bg-panel); display: flex; flex-direction: column; min-height: 0; }
-.conversation { display: flex; flex-direction: column; min-height: 0; background: var(--bg-app); min-width: 0; }
+.left-panel {
+  grid-column: 1; /* §6.12 显式列位：display:none 折叠时对话栏不被重排 */
+  border-right: 1px solid var(--border); background: var(--bg-panel); display: flex; flex-direction: column; min-height: 0;
+}
+/* §6.12 一键折叠 */
+.left-panel.collapsed { display: none; }
+.workspace.collapsed { display: none; }
+.writing-module.scenes-collapsed { grid-template-columns: 1fr; }
+.writing-module.scenes-collapsed .writing-scenes { display: none; }
+.topbar-toggle.active { background: var(--accent); color: var(--accent-contrast); }
+.conversation {
+  grid-column: 2; /* §6.12 显式列位：折叠左右栏时对话栏始终在第 2 列 */
+  display: flex; flex-direction: column; min-height: 0; background: var(--bg-app); min-width: 0;
+}
 .conversation.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
 /* ============================================================ 右栏（ux-review §4.6 收敛） */
-.workspace { border-left: 1px solid var(--border); background: var(--bg-panel); overflow-y: auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.workspace {
+  grid-column: 3; /* §6.12 显式列位：折叠时对话栏不被重排 */
+  border-left: 1px solid var(--border); background: var(--bg-panel); overflow-y: auto; min-height: 0; min-width: 0; display: flex; flex-direction: column;
+}
 .ws-back { flex-shrink: 0; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); }
 .ws-back .tiny-btn { font-size: 12px; }
 .overview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

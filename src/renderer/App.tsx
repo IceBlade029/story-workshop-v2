@@ -131,6 +131,9 @@ function TopBar(): React.ReactElement {
   const project = useStore((s) => s.project);
   const projects = useStore((s) => s.projects);
   const module = useStore((s) => s.module);
+  const leftCollapsed = useStore((s) => s.leftCollapsed);
+  const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const scenesCollapsed = useStore((s) => s.scenesCollapsed);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [menuOpen, setMenuOpen] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement>(null);
@@ -247,6 +250,41 @@ function TopBar(): React.ReactElement {
           </button>
         ))}
       </div>
+      {/* §6.12 一键折叠：讨论模块左右栏 / 写作模块场景树 / 专注写作（三栏全折） */}
+      {module === 'discussion' && (
+        <>
+          <button
+            className={`tiny-btn topbar-toggle${leftCollapsed ? ' active' : ''}`}
+            onClick={() => store.toggleLeftPanel()}
+            title={leftCollapsed ? '展开左栏（大纲/设定/会话）' : '折叠左栏（大纲/设定/会话）'}
+          >
+            左栏
+          </button>
+          <button
+            className={`tiny-btn topbar-toggle${rightCollapsed ? ' active' : ''}`}
+            onClick={() => store.toggleRightPanel()}
+            title={rightCollapsed ? '展开右栏（对象详情）' : '折叠右栏（对象详情）'}
+          >
+            右栏
+          </button>
+        </>
+      )}
+      {module === 'writing' && (
+        <button
+          className={`tiny-btn topbar-toggle${scenesCollapsed ? ' active' : ''}`}
+          onClick={() => store.toggleScenes()}
+          title={scenesCollapsed ? '展开场景树' : '折叠场景树'}
+        >
+          场景
+        </button>
+      )}
+      <button
+        className={`tiny-btn topbar-toggle${leftCollapsed && rightCollapsed && scenesCollapsed ? ' active' : ''}`}
+        onClick={() => store.toggleFocus()}
+        title="专注写作：一键折叠/展开全部侧栏"
+      >
+        专注
+      </button>
       <span className="spacer" />
       <button className="tiny-btn" onClick={() => setSettingsOpen(true)} title="设置（弹窗）">⚙</button>
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
@@ -258,6 +296,9 @@ function App(): React.ReactElement {
   const project = useStore((s) => s.project);
   const toast = useStore((s) => s.toast);
   const module = useStore((s) => s.module);
+  const leftCollapsed = useStore((s) => s.leftCollapsed);
+  const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const scenesCollapsed = useStore((s) => s.scenesCollapsed);
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [cols, setCols] = React.useState({ left: 250, right: 340 });
   const colsRef = React.useRef(cols);
@@ -265,6 +306,7 @@ function App(): React.ReactElement {
 
   useEffect(() => {
     setCols({ left: loadWidth('sw2:col-left', 250), right: loadWidth('sw2:col-right', 340) });
+    store.initCollapsed();
   }, []);
 
   // 订阅主进程 run 流式事件
@@ -340,17 +382,19 @@ function App(): React.ReactElement {
               >
                 <div
                   className="layout"
-                  style={{ '--col-left': `${cols.left}px`, '--col-right': `${cols.right}px` } as React.CSSProperties}
+                  style={{ '--col-left': `${leftCollapsed ? 0 : cols.left}px`, '--col-right': `${rightCollapsed ? 0 : cols.right}px` } as React.CSSProperties}
                 >
-                  <div className="splitter" style={{ left: `calc(${cols.left}px - 3px)` }} onMouseDown={(e) => startDrag('left', e)} />
-                  <LeftPanel />
+                  {!leftCollapsed && <div className="splitter" style={{ left: `calc(${cols.left}px - 3px)` }} onMouseDown={(e) => startDrag('left', e)} />}
+                  <LeftPanel collapsed={leftCollapsed} />
                   <ConversationPane />
-                  <Workspace />
-                  <div
-                    className="splitter"
-                    style={{ left: `calc(100% - ${cols.right}px - 3px)` }}
-                    onMouseDown={(e) => startDrag('right', e)}
-                  />
+                  <Workspace collapsed={rightCollapsed} />
+                  {!rightCollapsed && (
+                    <div
+                      className="splitter"
+                      style={{ left: `calc(100% - ${cols.right}px - 3px)` }}
+                      onMouseDown={(e) => startDrag('right', e)}
+                    />
+                  )}
                 </div>
               </div>
               {/* 正文模块：场景树 + 可见视图 + 正文工作区 */}
@@ -358,7 +402,7 @@ function App(): React.ReactElement {
                 className="writing-module-host"
                 style={{ display: module === 'writing' ? undefined : 'none' }}
               >
-                <WritingModule />
+                <WritingModule scenesCollapsed={scenesCollapsed} />
               </div>
             </div>
           </div>

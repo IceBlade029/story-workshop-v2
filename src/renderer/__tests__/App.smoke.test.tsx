@@ -699,4 +699,63 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
     // 回到项目选择屏
     expect(screen.getByPlaceholderText('项目名称')).toBeTruthy();
   });
+
+  it('一键折叠（§6.12）：左栏按钮折叠/恢复；专注模式折叠全部侧栏', async () => {
+    await openProject();
+    const leftPanel = (): HTMLElement | null => document.querySelector('.left-panel');
+    const workspace = (): HTMLElement | null => document.querySelector('.workspace');
+    const writingModule = (): HTMLElement | null => document.querySelector('.writing-module');
+
+    // 初始展开
+    expect(leftPanel()?.className).not.toContain('collapsed');
+    expect(workspace()?.className).not.toContain('collapsed');
+
+    // 折叠左栏
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('折叠左栏（大纲/设定/会话）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(leftPanel()?.className).toContain('collapsed');
+    expect(screen.getByTestId('chat-input')).toBeTruthy(); // 对话区仍在
+
+    // 恢复左栏
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('展开左栏（大纲/设定/会话）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(leftPanel()?.className).not.toContain('collapsed');
+
+    // 专注模式：左栏 + 右栏全部折叠
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('专注写作：一键折叠/展开全部侧栏'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(leftPanel()?.className).toContain('collapsed');
+    expect(workspace()?.className).toContain('collapsed');
+
+    // 再点恢复（写作模块场景树也一并恢复）
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('专注写作：一键折叠/展开全部侧栏'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(leftPanel()?.className).not.toContain('collapsed');
+    expect(workspace()?.className).not.toContain('collapsed');
+    expect(writingModule()?.className).not.toContain('scenes-collapsed');
+
+    // 写作模块内「场景」按钮折叠场景树
+    await act(async () => {
+      fireEvent.click(screen.getByText('正文写作'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('折叠场景树'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(writingModule()?.className).toContain('scenes-collapsed');
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('展开场景树'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(writingModule()?.className).not.toContain('scenes-collapsed');
+  });
 });

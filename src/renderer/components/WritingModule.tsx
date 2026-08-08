@@ -654,7 +654,7 @@ function ExportDialog({ currentFormat, onClose }: {
 
 // --------------------------------------------------------------------------- 模块
 
-export function WritingModule(): React.ReactElement {
+export function WritingModule({ scenesCollapsed }: { scenesCollapsed?: boolean }): React.ReactElement {
   const project = useStore((s) => s.project);
   const sceneId = useStore((s) => s.writingSceneId);
   const activeRun = useStore((s) => s.activeRun);
@@ -696,7 +696,7 @@ export function WritingModule(): React.ReactElement {
   const scene = project.nodes.find((n) => n.id === sceneId && n.type === 'scene') ?? null;
 
   return (
-    <div className="writing-module">
+    <div className={`writing-module${scenesCollapsed ? ' scenes-collapsed' : ''}`}>
       <aside className="writing-scenes">
         <div className="ws-head"><h3>场景</h3><span className="muted small">只导航 · 选择后右侧操作</span></div>
         <div className="scene-tree">

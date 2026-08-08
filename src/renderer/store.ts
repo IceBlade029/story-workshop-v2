@@ -102,6 +102,12 @@ export interface AppState {
   expandedIds: Set<string>;
   /** 大纲树搜索词 */
   treeSearch: string;
+  /** 讨论模块左栏折叠（§6.12：一键折叠腾出对话空间） */
+  leftCollapsed: boolean;
+  /** 讨论模块右栏折叠 */
+  rightCollapsed: boolean;
+  /** 写作模块场景树折叠 */
+  scenesCollapsed: boolean;
   /**
    * 派生视图（随 project 缓存，useSyncExternalStore 需要稳定引用）：
    * 活动路径消息 + 光标后未整理计数（§5.3）。
@@ -129,9 +135,39 @@ const initial: AppState = {
   toast: null,
   expandedIds: new Set(),
   treeSearch: '',
+  leftCollapsed: false,
+  rightCollapsed: false,
+  scenesCollapsed: false,
   activePath: [],
   unorganizedCount: 0,
 };
+
+/** 折叠状态持久化（§6.12：跨模块/跨项目保持；与列宽同存 localStorage）。 */
+const COLLAPSED_KEY = 'sw2:collapsed';
+
+function loadCollapsed(): { leftCollapsed: boolean; rightCollapsed: boolean; scenesCollapsed: boolean } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '{}') as Partial<Record<'left' | 'right' | 'scenes', boolean>>;
+    return {
+      leftCollapsed: raw.left === true,
+      rightCollapsed: raw.right === true,
+      scenesCollapsed: raw.scenes === true,
+    };
+  } catch {
+    return { leftCollapsed: false, rightCollapsed: false, scenesCollapsed: false };
+  }
+}
+
+function persistCollapsed(s: AppState): void {
+  try {
+    localStorage.setItem(
+      COLLAPSED_KEY,
+      JSON.stringify({ left: s.leftCollapsed, right: s.rightCollapsed, scenes: s.scenesCollapsed }),
+    );
+  } catch {
+    /* localStorage 不可用时忽略 */
+  }
+}
 
 let state: AppState = initial;
 const listeners = new Set<() => void>();
@@ -187,6 +223,7 @@ function applyDerived(s: AppState): AppState {
 
 function setState(patch: Partial<AppState>): void {
   state = applyDerived({ ...state, ...patch });
+  persistCollapsed(state);
   for (const l of listeners) l();
 }
 
@@ -223,6 +260,7 @@ function scheduleRunFallback(runId: string): void {
 
 function withState<T>(next: (s: AppState) => AppState): void {
   state = applyDerived(next(state));
+  persistCollapsed(state);
   for (const l of listeners) l();
 }
 
@@ -381,6 +419,39 @@ export const store = {
 
   setTab(tab: TabId): void {
     setState({ tab });
+  },
+
+  /** 启动时恢复折叠偏好（§6.12，localStorage）。 */
+  initCollapsed(): void {
+    setState(loadCollapsed());
+  },
+
+  /** 讨论模块左栏折叠切换（§6.12）。 */
+  toggleLeftPanel(): void {
+    withState((s) => ({ ...s, leftCollapsed: !s.leftCollapsed }));
+  },
+
+  /** 讨论模块右栏折叠切换。 */
+  toggleRightPanel(): void {
+    withState((s) => ({ ...s, rightCollapsed: !s.rightCollapsed }));
+  },
+
+  /** 写作模块场景树折叠切换。 */
+  toggleScenes(): void {
+    withState((s) => ({ ...s, scenesCollapsed: !s.scenesCollapsed }));
+  },
+
+  /** 专注写作模式（§6.12）：三栏全部折叠/全部展开。 */
+  toggleFocus(): void {
+    withState((s) => {
+      const allCollapsed = s.leftCollapsed && s.rightCollapsed && s.scenesCollapsed;
+      return {
+        ...s,
+        leftCollapsed: !allCollapsed,
+        rightCollapsed: !allCollapsed,
+        scenesCollapsed: !allCollapsed,
+      };
+    });
   },
 
   /** 切换顶层模块（ux-review §2：讨论 / 正文）；模块内状态互相独立。 */
