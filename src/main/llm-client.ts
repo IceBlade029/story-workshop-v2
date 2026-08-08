@@ -768,6 +768,8 @@ export async function responsesStream(
   const dataLines: string[] = [];
   /** 本轮是否已通过 reasoning_text.delta 流式发过思维链（completed 兜底时避免重复） */
   let streamedReasoning = false;
+  /** output_item.added(reasoning) 捕获的思维链（若 delta 事件缺失，completed 兜底用） */
+  let reasoningFromItems = '';
 
   const flushData = (): void => {
     if (dataLines.length === 0) return;
@@ -799,6 +801,15 @@ export async function responsesStream(
             webSearchItems.set(item.id, { id: item.id, status: item.status, action: item.action ?? { type: 'search' } });
           }
           emit({ content: '', finishReason: null, searchStatus: 'searching' });
+        } else if (item.type === 'reasoning') {
+          // 思维链来源 3：output_item.added(reasoning)。若本轮 delta 事件缺失
+          // （部分工具轮实现只在 item 里给思维链），completed 兜底用它回传，
+          // 否则 run-loop 拿不到 reasoning → 下一轮 400（reasoning_text must be passed back）
+          const text = (item.content ?? [])
+            .filter((b) => b.type === 'reasoning_text' && b.text)
+            .map((b) => b.text)
+            .join('');
+          if (text) reasoningFromItems += text;
         }
         break;
       }
@@ -838,12 +849,14 @@ export async function responsesStream(
           full?.incomplete_details?.reason === 'max_output_tokens' ? 'length' :
           full?.incomplete_details?.reason === 'content_filter' ? 'content_filter' :
           responsesFinishReason(out);
-        // 思维链兜底：若工具轮（function/web_search）的思维链没有以 delta 事件
-        // 流式发出、只出现在 completed 完整 output 里，则补发 reasoning_delta，
+        // 思维链兜底：工具轮（function/web_search）的思维链可能以三种方式出现——
+        // delta 事件 / output_item.added(reasoning) / completed 完整 output。
+        // 只要 delta 未流式发出，就从其余来源补发 reasoning_delta，
         // 否则 run-loop 拿不到 reasoning → 下一轮回传缺失 → DeepSeek 400
         // （The reasoning_text in the thinking mode must be passed back）
-        if (out.reasoning && !streamedReasoning) {
-          emit({ content: '', finishReason: null, reasoningContent: out.reasoning });
+        const fallbackReasoning = out.reasoning || reasoningFromItems;
+        if (fallbackReasoning && !streamedReasoning) {
+          emit({ content: '', finishReason: null, reasoningContent: fallbackReasoning });
         }
         const webCalls = out.webSearchCalls.length > 0 ? out.webSearchCalls : undefined;
         emit({

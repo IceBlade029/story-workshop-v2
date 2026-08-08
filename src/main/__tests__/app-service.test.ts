@@ -735,4 +735,36 @@ describe('app-service — 设置（全局设置与项目解耦）', () => {
     expect(model.optionsList.length).toBeGreaterThan(0);
     expect(model.optionsList[0]?.maxTokens).toBe(32768);
   });
+
+  it('回答详略档位：detailed → 系统提示含量化规则；concise → 简洁规则；auto → 触发式规则', async () => {
+    // detailed
+    {
+      const { service, model } = makeRecordingService([{ type: 'final', answer: '好', usage: usage(5, 2) }]);
+      service.sendMessage('详细评价这段正文');
+      await service.run({ kind: 'chat', answerDetail: 'detailed' });
+      const prompt = model.inputs[0].systemPrompt;
+      expect(prompt).toContain('本次回答要求详细');
+      expect(prompt).toContain('不少于 1000 字');
+      expect(prompt).toContain('5-8 个维度');
+    }
+    // concise
+    {
+      const { service, model } = makeRecordingService([{ type: 'final', answer: '好', usage: usage(5, 2) }]);
+      service.sendMessage('详细评价这段正文');
+      await service.run({ kind: 'chat', answerDetail: 'concise' });
+      const prompt = model.inputs[0].systemPrompt;
+      expect(prompt).toContain('本次回答要求简略');
+      expect(prompt).toContain('300 字以内');
+      expect(prompt).not.toContain('不少于 1000 字');
+    }
+    // auto（缺省）：保留触发式「回答充分性」，不注入显式档位
+    {
+      const { service, model } = makeRecordingService([{ type: 'final', answer: '好', usage: usage(5, 2) }]);
+      service.sendMessage('你好');
+      await service.run({ kind: 'chat' });
+      const prompt = model.inputs[0].systemPrompt;
+      expect(prompt).toContain('回答充分性');
+      expect(prompt).not.toContain('本次回答要求');
+    }
+  });
 });

@@ -502,4 +502,49 @@ describe('responsesStream', () => {
     expect(received.filter((c) => c.reasoningContent)).toHaveLength(2);
     expect(received.filter((c) => c.reasoningContent).map((c) => c.reasoningContent).join('')).toBe('先想一想再调工具');
   });
+
+  it('回归：工具轮思维链只以 output_item.added(reasoning) 提供（无 delta、completed output 无 reasoning）→ 补发 reasoning_delta', async () => {
+    const { responsesStream } = await import('../llm-client');
+    const chunks: string[] = [
+      // 思维链以 reasoning item 形式加入输出（没有 reasoning_text.delta 事件）
+      sseEvent('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'reasoning', content: [{ type: 'reasoning_text', text: '附件内容大，先读取' }] },
+      }),
+      sseEvent('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 1,
+        item: { type: 'function_call', id: 'call_1', name: 'read_attachment' },
+      }),
+      sseEvent('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', output_index: 1, delta: '{"attachmentId":"att_1"}' }),
+      // completed 的 output 不含 reasoning（只含最终 function_call）
+      sseEvent('response.completed', {
+        type: 'response.completed',
+        response: {
+          id: 'r6',
+          status: 'completed',
+          output: [{ type: 'function_call', id: 'call_1', name: 'read_attachment', arguments: '{"attachmentId":"att_1"}' }],
+          usage: usagePayload,
+        },
+      }),
+    ];
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(createStreamResponse(chunks));
+
+    const received: LLMStreamChunk[] = [];
+    await responsesStream(
+      { messages: [{ role: 'user', content: '读一下附件' }], stream: true },
+      new Map(),
+      (chunk) => { received.push(chunk); },
+    );
+
+    // 从 output_item.added(reasoning) 捕获 → 补发一次 reasoning_delta，且先于 done
+    const reasoningChunks = received.filter((c) => c.reasoningContent);
+    expect(reasoningChunks).toHaveLength(1);
+    expect(reasoningChunks[0].reasoningContent).toBe('附件内容大，先读取');
+    const usageIdx = received.findIndex((c) => c.usage);
+    expect(received.findIndex((c) => c.reasoningContent)).toBeLessThan(usageIdx);
+    expect(received[usageIdx].finishReason).toBe('tool_calls');
+  });
 });

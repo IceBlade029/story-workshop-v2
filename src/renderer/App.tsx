@@ -315,6 +315,7 @@ function App(): React.ReactElement {
   useEffect(() => {
     setCols({ left: loadWidth('sw2:col-left', 250), right: loadWidth('sw2:col-right', 340) });
     store.initCollapsed();
+    store.initAnswerDetail();
   }, []);
 
   // 主题校正：project.settings.theme 为权威值（settings.json），

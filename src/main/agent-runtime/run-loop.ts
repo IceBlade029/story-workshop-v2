@@ -20,7 +20,7 @@ import * as path from 'path';
 import type { ModelAdapter, ModelTurn, ModelTurnInput } from './model-types';
 import type { ToolResult, ToolContext } from './tool-types';
 import { ToolRegistry } from './tool-registry';
-import { TASK_DEFINITIONS, WRITE_TOOL_NAMES } from './task-definitions';
+import { TASK_DEFINITIONS, WRITE_TOOL_NAMES, ANSWER_DETAIL_RULES } from './task-definitions';
 import { RunRecorder, persistRunSummary, persistRunRecord } from './run-recorder';
 import { validateToolArgs } from './args-validate';
 import { generateId } from '../storage/id';
@@ -54,6 +54,8 @@ export interface RunRequest {
   maxTurns?: number;
   /** 单次模型调用的最大输出 tokens（来自全局设置；缺省 = API 默认） */
   maxOutputTokens?: number;
+  /** 本次回答详略档位（聊天工具栏每次发送可选；仅 chat 生效，缺省 = auto） */
+  answerDetail?: 'concise' | 'auto' | 'detailed';
   signal?: AbortSignal;
   /** 流式文本回调（final 回合） */
   onChunk?: (chunk: string) => void;
@@ -504,7 +506,9 @@ export class RunCoordinator {
     baseMessages: ModelTurnInput['messages'],
     turnContext: ModelTurnInput['messages'],
   ): ModelTurnInput {
-    const systemPrompt = taskDef.systemPrompt + (request.scope ? `\n\n本次范围：${request.scope}` : '');
+    // 回答详略档位：仅 chat 任务注入（organize 总结 / 正文输出不受影响）
+    const detailRule = request.taskKind === 'chat' ? ANSWER_DETAIL_RULES[request.answerDetail ?? 'auto'] : '';
+    const systemPrompt = taskDef.systemPrompt + (request.scope ? `\n\n本次范围：${request.scope}` : '') + (detailRule ? `\n\n${detailRule}` : '');
     const messages: ModelTurnInput['messages'] = [...baseMessages, ...turnContext];
 
     const tools = this.deps.registry

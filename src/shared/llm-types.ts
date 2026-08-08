@@ -15,6 +15,16 @@ export type ThemeId = 'system' | 'parchment' | 'nebula' | 'sakura' | 'emerald';
 /** 对话回答的 Markdown 渲染样式（输出系统：plain = 原样文本；其余为渲染风格）。 */
 export type OutputStyle = 'plain' | 'standard' | 'deepseek' | 'opencode';
 
+/**
+ * 单次回答详略档位（聊天工具栏每次发送可选，非全局设置）：
+ * - concise：正文 ≤300 字，直接要点
+ * - auto：不加篇幅约束，模型自然判断（保留「作者要求详细→充分展开」触发规则）
+ * - detailed：无条件 ≥1000 字 + 多维度展开 + 材料依据
+ */
+export type AnswerDetail = 'concise' | 'auto' | 'detailed';
+
+export const ANSWER_DETAILS: AnswerDetail[] = ['concise', 'auto', 'detailed'];
+
 /** 全局设置（明文存于 ~/.story-workshop/settings.json，非敏感）。 */
 export interface AppSettings {
   model: DeepSeekModelId;

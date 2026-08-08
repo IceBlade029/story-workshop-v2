@@ -1,4 +1,4 @@
-/**
+﻿/**
  * store.test.ts — 渲染层 store 逻辑测试（jsdom）。
  * 用 mock api 验证：活动路径派生、未整理计数、流式事件应用、
  * 子树展开、run 完成后的模式切换。
@@ -306,7 +306,7 @@ describe('store — 对话操作', () => {
     await store.sendAndRun('你好');
     expect(send).toHaveBeenCalledWith('你好');
     expect(store.getState().inputText).toBe('');
-    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm_new' });
+    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm_new', answerDetail: 'auto' });
   });
 
   it('刷新消息：启动 refresh run 并显示流式指示', async () => {
@@ -315,7 +315,7 @@ describe('store — 对话操作', () => {
     setApiForTest(makeApi({ run: { ...makeApi().run, refresh } }));
     await store.openProject('/proj');
     await store.refreshMessage('m2');
-    expect(refresh).toHaveBeenCalledWith('m2');
+    expect(refresh).toHaveBeenCalledWith('m2', 'auto');
     expect(store.getState().activeRun?.kind).toBe('chat');
   });
 
@@ -336,7 +336,7 @@ describe('store — 对话操作', () => {
     await store.editMessage('m1', '新问题');
     expect(edit).toHaveBeenCalledWith('m1', '新问题');
     // 自动重新发送：run 以取代消息（新版本）为父节点，续写从它开始
-    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm3' });
+    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm3', answerDetail: 'auto' });
     expect(store.getState().activeRun?.status).toBe('running');
   });
 
@@ -410,7 +410,7 @@ describe('store — 待发送附件（Part 3，ChatGPT 式）', () => {  it('sta
     expect(sendWithAttachments).toHaveBeenCalledWith('帮我看看', [{ name: '旧大纲.txt', content: '第一章内容', source: 'uploaded' }]);
     expect(store.getState().inputText).toBe('');
     expect(store.getState().pendingAttachments).toHaveLength(0);
-    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm_new' });
+    expect(start).toHaveBeenCalledWith({ kind: 'chat', parentMessageId: 'm_new', answerDetail: 'auto' });
   });
 
   it('sendWithPending：空文本但有附件也可发送；无文本无附件则跳过', async () => {

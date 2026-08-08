@@ -96,7 +96,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     start: (req: RunStartRequest) =>
       ipcRenderer.invoke('run:start', req),
     cancel: (runId: string) => ipcRenderer.invoke('run:cancel', runId),
-    refresh: (messageId: string) => ipcRenderer.invoke('run:refresh', messageId),
+    refresh: (messageId: string, answerDetail?: 'concise' | 'auto' | 'detailed') =>
+      ipcRenderer.invoke('run:refresh', messageId, answerDetail),
     detailFill: (sceneId: string, format: string, feedback?: string) =>
       ipcRenderer.invoke('run:detailFill', sceneId, format, feedback),
     revise: (sceneId: string, format: string, start: number, end: number, instruction: string) =>

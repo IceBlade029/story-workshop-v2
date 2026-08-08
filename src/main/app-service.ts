@@ -911,6 +911,8 @@ export class AppService {
         messages: ctx.messages,
         parentMessageId: req.parentMessageId ?? path.at(-1)?.id,
         contextInfo: ctx.contextInfo,
+        // 每次发送由聊天工具栏选择的回答详略档位
+        answerDetail: req.answerDetail,
       };
     }
 
@@ -1196,7 +1198,7 @@ export class AppService {
   }
 
   /** 刷新：对最后一条 AI 消息重新生成，旧回复保留为兄弟分支（§3.2）。归档会话完全只读（ux-review §4.5）。 */
-  async refreshMessage(messageId: string, hooks: AppRunHooks = {}): Promise<RunResult> {
+  async refreshMessage(messageId: string, hooks: AppRunHooks = {}, answerDetail?: 'concise' | 'auto' | 'detailed'): Promise<RunResult> {
     if (this.runActive) throw new Error('RUN_ALREADY_ACTIVE: 已有任务在运行，请先等待完成或取消');
     this.runActive = true;
     try {
@@ -1231,6 +1233,8 @@ export class AppService {
       supersedesMessageId: messageId,
       contextInfo: ctx.contextInfo,
       maxOutputTokens: getSettings().maxOutputTokens,
+      // 重新生成使用当前选择器档位（用户可先调档位再重新生成）
+      answerDetail,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,

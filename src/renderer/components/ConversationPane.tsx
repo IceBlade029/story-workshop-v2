@@ -615,6 +615,8 @@ function InputBar(): React.ReactElement {
   const running = useStore((s) => s.activeRun?.status === 'running');
   const project = useStore((s) => s.project);
   const activePath = useStore((s) => s.activePath);
+  // 回答详略档位（每次发送可选，localStorage 记忆）
+  const answerDetail = useStore((s) => s.answerDetail);
   // 归档会话完全只读（ux-review §4.5）：不显示输入区
   const archivedView = useStore((s) => {
     const sess = s.project?.sessions.find((x) => x.id === s.project?.activeSessionId);
@@ -678,6 +680,16 @@ function InputBar(): React.ReactElement {
           />
           思考
         </label>
+        <select
+          className="model-select"
+          value={answerDetail}
+          onChange={(e) => store.setAnswerDetail(e.target.value as 'concise' | 'auto' | 'detailed')}
+          title="回答详略（每次发送可选；重新生成沿用当前档位）"
+        >
+          <option value="concise">简略</option>
+          <option value="auto">自动</option>
+          <option value="detailed">详细</option>
+        </select>
         <span className={`muted small token-meter${tokenPct >= 85 ? ' token-meter-warn' : ''}`} title="已使用上下文估算进度">
           已使用 {tokenPct}%
         </span>

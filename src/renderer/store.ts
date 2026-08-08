@@ -9,7 +9,7 @@ import { getApi } from './api';
 import { applyTheme } from './theme';
 import { confirmDiscardDialog } from './components/ui/dialog';
 import type { ProjectState, RunStreamEvent, NodeContent, OutputInfo, ContextInspection, NodeVersion, FileDiff, RunSummaryEntry, OutputVersion, ExportBookResult, GlobalSearchResult } from '../shared/ipc-types';
-import type { AppSettings } from '../shared/llm-types';
+import type { AppSettings, AnswerDetail } from '../shared/llm-types';
 import type { ChatMessage, ToolCallTrace, VisibleView } from '../shared/types';
 
 export type TabId = 'outline' | 'assets' | 'sessions' | 'trash';
@@ -43,11 +43,11 @@ export type RunKind = 'chat' | 'organize' | 'detail_fill' | 'revise';
 
 /** 一次 run 的启动参数（错误/取消后「重试」用，ux-review §4.1）。 */
 export type RunRequestParams =
-  | { kind: 'chat'; parentMessageId?: string }
+  | { kind: 'chat'; parentMessageId?: string; answerDetail?: AnswerDetail }
   | { kind: 'organize'; scope?: import('../shared/ipc-types').OrganizeScope; note?: string }
   | { kind: 'detail_fill'; sceneId: string; format: string; feedback?: string }
   | { kind: 'revise'; sceneId: string; format: string; start: number; end: number; instruction: string }
-  | { kind: 'refresh'; messageId: string };
+  | { kind: 'refresh'; messageId: string; answerDetail?: AnswerDetail };
 
 export interface ActiveRun {
   runId: string;
@@ -114,6 +114,8 @@ export interface AppState {
   rightCollapsed: boolean;
   /** 写作模块场景树折叠 */
   scenesCollapsed: boolean;
+  /** 回答详略档位（聊天工具栏每次发送可选；localStorage 记忆上次选择） */
+  answerDetail: AnswerDetail;
   /**
    * 派生视图（随 project 缓存，useSyncExternalStore 需要稳定引用）：
    * 活动路径消息 + 光标后未整理计数（§5.3）。
@@ -145,12 +147,34 @@ const initial: AppState = {
   leftCollapsed: false,
   rightCollapsed: false,
   scenesCollapsed: false,
+  answerDetail: 'auto',
   activePath: [],
   unorganizedCount: 0,
 };
 
 /** 折叠状态持久化（§6.12：跨模块/跨项目保持；与列宽同存 localStorage）。 */
 const COLLAPSED_KEY = 'sw2:collapsed';
+
+/** 回答详略档位记忆（聊天工具栏选择，跨会话保持）。 */
+const ANSWER_DETAIL_KEY = 'sw2:answer-detail';
+
+function loadAnswerDetail(): AnswerDetail {
+  try {
+    const raw = localStorage.getItem(ANSWER_DETAIL_KEY);
+    if (raw === 'concise' || raw === 'auto' || raw === 'detailed') return raw;
+  } catch {
+    /* localStorage 不可用时忽略 */
+  }
+  return 'auto';
+}
+
+function persistAnswerDetail(detail: AnswerDetail): void {
+  try {
+    localStorage.setItem(ANSWER_DETAIL_KEY, detail);
+  } catch {
+    /* localStorage 不可用时忽略 */
+  }
+}
 
 function loadCollapsed(): { leftCollapsed: boolean; rightCollapsed: boolean; scenesCollapsed: boolean } {
   try {
@@ -435,6 +459,17 @@ export const store = {
     setState(loadCollapsed());
   },
 
+  /** 启动时恢复回答详略档位（聊天工具栏，localStorage 记忆）。 */
+  initAnswerDetail(): void {
+    setState({ answerDetail: loadAnswerDetail() });
+  },
+
+  /** 设置回答详略档位（每次发送可选；记忆上次选择）。 */
+  setAnswerDetail(detail: AnswerDetail): void {
+    setState({ answerDetail: detail });
+    persistAnswerDetail(detail);
+  },
+
   /** 讨论模块左栏折叠切换（§6.12）。 */
   toggleLeftPanel(): void {
     withState((s) => ({ ...s, leftCollapsed: !s.leftCollapsed }));
@@ -590,7 +625,7 @@ export const store = {
     setState({ inputText: '' });
     const project = await api.conversation.send(content);
     setState({ project });
-    await this.startRun('chat', { parentMessageId: project.activeMessageId });
+    await this.startRun('chat', { parentMessageId: project.activeMessageId, answerDetail: state.answerDetail });
   },
 
   /**
@@ -612,33 +647,35 @@ export const store = {
     setState({ inputText: '', pendingAttachments: [] });
     const project = await api.conversation.sendWithAttachments(content, attachments);
     setState({ project });
-    await this.startRun('chat', { parentMessageId: project.activeMessageId });
+    await this.startRun('chat', { parentMessageId: project.activeMessageId, answerDetail: state.answerDetail });
   },
 
   async organize(scope?: 'unorganized' | 'all', note?: string): Promise<void> {
     await this.startRun('organize', { scope: scope === 'all' ? { type: 'all' } : { type: 'unorganized' }, note });
   },
 
-  async startRun(kind: 'chat' | 'organize', req: { parentMessageId?: string; scope?: import('../shared/ipc-types').OrganizeScope; note?: string }): Promise<void> {
+  async startRun(kind: 'chat' | 'organize', req: { parentMessageId?: string; scope?: import('../shared/ipc-types').OrganizeScope; note?: string; answerDetail?: AnswerDetail }): Promise<void> {
     const api = getApi();
     const { runId } = await api.run.start({ kind, ...req });
     const retry: RunRequestParams = kind === 'chat'
-      ? { kind: 'chat', parentMessageId: req.parentMessageId }
+      ? { kind: 'chat', parentMessageId: req.parentMessageId, answerDetail: req.answerDetail }
       : { kind: 'organize', scope: req.scope ?? { type: 'unorganized' }, note: req.note };
     withState((s) => ({ ...s, refreshingMessageId: null, activeRun: { runId, kind, chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry } }));
     scheduleRunFallback(runId);
   },
 
   /** 刷新最后一条 AI 消息（重新生成，生成新版本 ◀ ▶ 可切换）。
-   * 旧回答立即被流式卡片就地替换（refreshingMessageId），完成后新版本接管。 */
+   * 旧回答立即被流式卡片就地替换（refreshingMessageId），完成后新版本接管。
+   * 档位使用当前选择器值（用户可先调档位再重新生成）。 */
   async refreshMessage(messageId: string): Promise<void> {
     const api = getApi();
     if (state.activeRun?.status === 'running') throw new Error('RUN_IN_PROGRESS: 运行中不能重新生成，请先等待完成或取消');
-    const { runId } = await api.run.refresh(messageId);
+    const detail = state.answerDetail;
+    const { runId } = await api.run.refresh(messageId, detail);
     withState((s) => ({
       ...s,
       refreshingMessageId: messageId,
-      activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: { kind: 'refresh', messageId } },
+      activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: { kind: 'refresh', messageId, answerDetail: detail } },
     }));
     scheduleRunFallback(runId);
   },
@@ -691,7 +728,7 @@ export const store = {
     if (!params) return;
     switch (params.kind) {
       case 'chat': {
-        const { runId } = await getApi().run.start({ kind: 'chat', parentMessageId: params.parentMessageId });
+        const { runId } = await getApi().run.start({ kind: 'chat', parentMessageId: params.parentMessageId, answerDetail: params.answerDetail });
         withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
@@ -709,7 +746,7 @@ export const store = {
         break;
       }
       case 'refresh': {
-        const { runId } = await getApi().run.refresh(params.messageId);
+        const { runId } = await getApi().run.refresh(params.messageId, params.answerDetail);
         withState((s) => ({ ...s, refreshingMessageId: params.messageId, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
@@ -749,7 +786,7 @@ export const store = {
     setState({ project });
     // 找到取代消息（新版本）作为 run 父节点；编辑后的续写从它开始
     const replacement = project.messages.find((m) => m.supersedesId === messageId);
-    await this.startRun('chat', { parentMessageId: replacement?.id ?? project.activeMessageId });
+    await this.startRun('chat', { parentMessageId: replacement?.id ?? project.activeMessageId, answerDetail: state.answerDetail });
   },
 
   // ------------------------------------------------------------ 会话（ux-review §4.5，ChatGPT 式）

@@ -458,7 +458,7 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
       fireEvent.click(regenBtn);
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(refresh).toHaveBeenCalledWith('m2');
+    expect(refresh).toHaveBeenCalledWith('m2', 'auto');
     // 就地替换（bug 修复）：旧回答立即被流式卡片替换，不再「先新增卡片、完成后才替换」
     expect(screen.queryByText('明白。')).toBeNull();
     expect(screen.getByText('重新生成中…')).toBeTruthy();
@@ -754,6 +754,61 @@ describe('输出系统 — 回答样式与最大输出长度', () => {
     });
     expect(document.querySelector('.md')).toBeNull();
     expect(document.querySelector('pre.msg-content')).toBeTruthy();
+  });
+
+  it('回答详略档位：工具栏选择器存在；切换后发送 → run.start 携带档位；localStorage 记忆', async () => {
+    const api = makeApi();
+    const start = vi.fn(async () => ({ runId: 'run_1' }));
+    api.run.start = start;
+    setApiForTest(api);
+    store.reset();
+    window.localStorage.removeItem('sw2:answer-detail');
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 选择器默认「自动」；切换到「详细」
+    const detailSelect = screen.getByTitle('回答详略（每次发送可选；重新生成沿用当前档位）') as HTMLSelectElement;
+    expect(detailSelect.value).toBe('auto');
+    fireEvent.change(detailSelect, { target: { value: 'detailed' } });
+    expect(window.localStorage.getItem('sw2:answer-detail')).toBe('detailed');
+    expect(store.getState().answerDetail).toBe('detailed');
+
+    // 发送 → run.start 携带档位
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: '详细评价' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-send'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ kind: 'chat', answerDetail: 'detailed' }));
+  });
+
+  it('回答详略档位：重新生成携带当前选择器档位；重启后从 localStorage 恢复', async () => {
+    const api = makeApi();
+    const refresh = vi.fn(async () => ({ runId: 'run_rf' }));
+    api.run.refresh = refresh;
+    setApiForTest(api);
+    store.reset();
+    // 模拟上次会话的记忆（详细档）
+    window.localStorage.setItem('sw2:answer-detail', 'concise');
+    await renderApp();
+    store.initAnswerDetail();
+    expect(store.getState().answerDetail).toBe('concise');
+
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 重新生成 → refresh 携带当前档位（concise）
+    await act(async () => {
+      fireEvent.click(screen.getByText('⟳ 重新生成'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(refresh).toHaveBeenCalledWith('m2', 'concise');
   });
 
   it('截断徽标：AI 消息 truncated=true → 显示「已截断」', async () => {

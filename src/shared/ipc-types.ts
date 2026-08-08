@@ -18,7 +18,7 @@ import type {
   ToolCallTrace,
   VisibleView,
 } from './types';
-import type { AppSettings } from './llm-types';
+import type { AppSettings, AnswerDetail } from './llm-types';
 
 /** 节点扁平摘要（渲染层大纲树用） */
 export interface NodeSummary {
@@ -180,6 +180,8 @@ export interface RunStartRequest {
   scope?: OrganizeScope;
   /** 附带说明（追加到范围描述，可选） */
   note?: string;
+  /** 本次回答详略档位（聊天工具栏每次发送可选；缺省 = auto） */
+  answerDetail?: AnswerDetail;
 }
 
 /** run:start 响应：runId 用于订阅流式事件 */
@@ -338,8 +340,8 @@ export interface RendererApi {
     start(req: RunStartRequest): Promise<RunStartResponse>;
     cancel(runId: string): Promise<void>;
     onEvent(listener: (event: RunStreamEvent) => void): () => void;
-    /** 刷新最后一条 AI 消息（重新生成，旧回复保留为兄弟分支） */
-    refresh(messageId: string): Promise<RunStartResponse>;
+    /** 刷新最后一条 AI 消息（重新生成，旧回复保留为兄弟分支）；answerDetail = 当前选择器档位 */
+    refresh(messageId: string, answerDetail?: AnswerDetail): Promise<RunStartResponse>;
     /** 正文生成（detail_fill，§6.5）：可见视图 → 正文 → outputs 落盘 */
     detailFill(sceneId: string, format: string, feedback?: string): Promise<RunStartResponse>;
     /** 就地改写（revise，§5.3）：模型返回选中区间的完整替换文本 */

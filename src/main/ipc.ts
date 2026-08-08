@@ -285,7 +285,7 @@ export function registerIpcHandlers(service: AppService): void {
   handle('output:applyRevise', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string, start: number, end: number, replacement: string) => service.applyRevise(sceneId, format, start, end, replacement));
   handle('output:undoRevise', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string) => service.undoRevise(sceneId, format));
 
-  handle('run:refresh', async (event: Electron.IpcMainInvokeEvent, messageId: string) => {
+  handle('run:refresh', async (event: Electron.IpcMainInvokeEvent, messageId: string, answerDetail?: 'concise' | 'auto' | 'detailed') => {
     const controller = new AbortController();
     const runId = `rf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     abortControllers.set(runId, controller);
@@ -296,7 +296,7 @@ export function registerIpcHandlers(service: AppService): void {
         onReasoning: (reasoningContent) => sendToWindow(event, { runId, type: 'chunk', text: '', reasoningContent }),
         onSearchStatus: (status) => sendToWindow(event, { runId, type: 'search', status }),
         onToolTrace: (trace) => sendToWindow(event, { runId, type: 'trace', trace }),
-      })
+      }, answerDetail)
       .then((result) => {
         abortControllers.delete(runId);
         sendToWindow(event, { runId, type: 'done', result });
