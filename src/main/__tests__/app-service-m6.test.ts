@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import { AppService } from '../app-service';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import type { ModelAdapter, ModelTurnInput, ModelTurn } from '../agent-runtime/model-types';
-import { CONTEXT_BUDGET_TOKENS, estimatePathTokens } from '../agent-runtime/context-compression';
+import { CONTEXT_BUDGET_TOKENS, MAX_OUTPUT_TOKENS, estimatePathTokens } from '../agent-runtime/context-compression';
 import { makeTempDir, removeDir } from './helpers/temp-project';
 
 vi.mock('../api-key-store', () => ({
@@ -61,7 +61,7 @@ function makeService(script: ScriptedTurn[] = []): { service: AppService; model:
 
 /** 超预算的长对话（m1 是大消息，其余为最近几轮）。 */
 function longPath(): import('../../shared/types').ChatMessage[] {
-  const headroom = CONTEXT_BUDGET_TOKENS - 4096 - Math.floor(CONTEXT_BUDGET_TOKENS * 0.15);
+  const headroom = CONTEXT_BUDGET_TOKENS - MAX_OUTPUT_TOKENS - Math.floor(CONTEXT_BUDGET_TOKENS * 0.15);
   const msgs: import('../../shared/types').ChatMessage[] = [];
   msgs.push({ id: 'm1', role: 'user', content: 'x'.repeat(Math.floor(headroom * 1.5) + 1), timestamp: 't' });
   const tail = ['后话一', '回答一', '后话二', '回答二', '后话三', '回答三', '收尾'];
@@ -73,7 +73,7 @@ function longPath(): import('../../shared/types').ChatMessage[] {
 
 /** 触发阈值（预算 - 回答预留 - 15% 预留窗口）。 */
 function headroom(): number {
-  return CONTEXT_BUDGET_TOKENS - 4096 - Math.floor(CONTEXT_BUDGET_TOKENS * 0.15);
+  return CONTEXT_BUDGET_TOKENS - MAX_OUTPUT_TOKENS - Math.floor(CONTEXT_BUDGET_TOKENS * 0.15);
 }
 
 describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {

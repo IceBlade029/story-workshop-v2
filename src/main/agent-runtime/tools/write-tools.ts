@@ -9,10 +9,14 @@ import { OutlineRepository, OVERVIEW_ROOT_ID } from '../../storage/outline-repos
 import { AssetRepository } from '../../storage/asset-repository';
 import { TrashRepository } from '../../storage/trash-repository';
 import { sha256 } from '../../storage/hash';
+import { assertSafeId } from '../../storage/path-safety';
 import { withProjectWriteLock } from '../../write-lock';
 import { ok, fail } from './tool-utils';
 import { generateId } from '../../storage/id';
 import type { ChangeItem, NodeType } from '../../../shared/types';
+
+/** 模型自定义 id 的安全字符集（与仓库层 assertSafeId 一致；P0 修复）。 */
+const SAFE_ID_PATTERN = '^[A-Za-z0-9_-]{1,80}$';
 
 export function makeWriteTools(projectDir: () => string): ToolSpec[] {
   const outline = () => new OutlineRepository(projectDir());
@@ -28,7 +32,7 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
           parentId: { type: 'string', description: '父节点 id（缺省 = 总纲根）' },
           type: { type: 'string', enum: ['volume', 'chapter', 'scene'], description: '节点类型' },
           title: { type: 'string', description: '节点标题' },
-          nodeId: { type: 'string', description: '自定义节点 id（可选；缺省自动生成）' },
+          nodeId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '自定义节点 id（可选；缺省自动生成）' },
           hidden: { type: 'boolean', description: '自动插入的隐藏中间层级' },
         },
         required: ['type', 'title'],
@@ -38,6 +42,15 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
         return withProjectWriteLock(projectDir(), () => {
           const repo = outline();
           const id = args.nodeId ?? generateId('n');
+          if (args.nodeId !== undefined) {
+            // P0 修复：模型自定义 id 必须通过安全校验（防目录穿越），
+            // 校验先于任何写入——坏 id 不能进入大纲树。
+            try {
+              assertSafeId(args.nodeId, 'node');
+            } catch {
+              return fail('INVALID_NODE_ID', `节点 id 非法（仅允许字母/数字/下划线/连字符，最多 80 位）: ${args.nodeId}`);
+            }
+          }
           if (repo.findNode(id)) return fail('NODE_ID_CONFLICT', `节点 id 已存在: ${id}`);
           const node = {
             id,
@@ -65,7 +78,7 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       inputSchema: {
         type: 'object',
         properties: {
-          nodeId: { type: 'string', description: '节点 id' },
+          nodeId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '节点 id' },
           title: { type: 'string', description: '新标题' },
         },
         required: ['nodeId', 'title'],
@@ -90,7 +103,7 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       inputSchema: {
         type: 'object',
         properties: {
-          nodeId: { type: 'string', description: '节点 id' },
+          nodeId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '节点 id' },
         },
         required: ['nodeId'],
       } as never,
@@ -112,7 +125,7 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       inputSchema: {
         type: 'object',
         properties: {
-          nodeId: { type: 'string', description: '节点 id' },
+          nodeId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '节点 id' },
           content: { type: 'string', description: '草稿 markdown 内容' },
         },
         required: ['nodeId', 'content'],
@@ -137,7 +150,7 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       inputSchema: {
         type: 'object',
         properties: {
-          assetId: { type: 'string', description: '设定 id（更新时必填；缺省 = 新建）' },
+          assetId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '设定 id（更新时必填；缺省 = 新建）' },
           type: { type: 'string', description: '设定类型（新建必填）' },
           title: { type: 'string', description: '标题（新建必填）' },
           content: { type: 'string', description: 'markdown 正文' },

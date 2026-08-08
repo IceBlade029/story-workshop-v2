@@ -22,6 +22,7 @@ import type { ToolResult, ToolContext } from './tool-types';
 import { ToolRegistry } from './tool-registry';
 import { TASK_DEFINITIONS, WRITE_TOOL_NAMES } from './task-definitions';
 import { RunRecorder, persistRunSummary, persistRunRecord } from './run-recorder';
+import { validateToolArgs } from './args-validate';
 import { generateId } from '../storage/id';
 import type { ProjectWorkspace } from '../storage/workspace';
 import type { ChatMessage, ChangeItem, TaskKind, ToolCallTrace } from '../../shared/types';
@@ -44,6 +45,12 @@ export interface RunRequest {
    * 指向它，旧消息保留为兄弟分支（读取时派生出 supersededBy）。
    */
   supersedesMessageId?: string;
+  /**
+   * 资源能力边界（P1 修复）：detail_fill / revise 运行时由 app-service
+   * 注入允许访问的场景与格式；工具执行器据此硬性过滤（缺省 = 不限制，
+   * chat / organize 保持全量可见）。
+   */
+  resourceScope?: { sceneId: string; format: string };
   maxTurns?: number;
   signal?: AbortSignal;
   /** 流式文本回调（final 回合） */
@@ -64,7 +71,7 @@ export interface RunResult {
   finalAnswer: string;
   turns: number;
   toolCallCount: number;
-  /** 本次调用写入工具的次数（硬门禁：organize 必须至少调用一次写入工具） */
+  /** 本次成功完成的写入工具调用次数（硬门禁：organize 必须至少成功写入一次） */
   writeToolCalls: number;
   usage: { inputTokens: number; outputTokens: number };
   /** 可写任务的快照目录 id（= runId） */
@@ -317,10 +324,29 @@ export class RunCoordinator {
           signal: request.signal,
           recordChange: (c) => recorder.record(c),
           attachmentScope,
+          ...(request.resourceScope
+            ? { allowedSceneId: request.resourceScope.sceneId, allowedFormat: request.resourceScope.format }
+            : {}),
         };
         let result: ToolResult;
+        // P0 修复：执行前做真正的 Schema 校验（必填/类型/枚举 + 未声明字段剔除）；
+        // 校验失败只让本次调用失败并回传模型，不终止整个 run（模型可自行纠正重试）。
+        const validation = validateToolArgs(spec.inputSchema as never, call.arguments);
+        if (!validation.ok) {
+          trace.status = 'failed';
+          trace.error = `INVALID_ARGS: ${validation.message}`;
+          emitTrace(trace);
+          toolDurations.push({ name: call.name, args: call.arguments, status: trace.status, error: trace.error, durationMs: 0 });
+          turnContext.push(toolObservation(call.id, {
+            ok: false,
+            code: 'INVALID_ARGS',
+            message: `参数校验失败：${validation.message}。请按工具说明重新调用。`,
+            retryable: true,
+          }));
+          continue;
+        }
         try {
-          result = await spec.execute(ctx, call.arguments);
+          result = await spec.execute(ctx, validation.args);
         } catch (err) {
           result = {
             ok: false,
@@ -346,12 +372,14 @@ export class RunCoordinator {
       error = 'RUN_TURNS_EXCEEDED';
     }
 
-    // 整理任务硬门禁（Part 4）：未调用任何写入工具 = 未执行整理。
+    // 整理任务硬门禁（Part 4 修订，P1 修复）：只统计「成功完成」的写入调用，
+    // 且要求本次确实产生了可落盘验证的变更（recorder.changes）。
+    // 失败/被拒的写入调用不再计入——模型只调用失败的写工具不能通过门禁。
     // 判定为失败 → 不推进整理光标、记录 status=error，UI 显示错误 + 重试。
-    const writeToolCalls = toolDurations.filter((t) => WRITE_TOOL_NAMES.has(t.name)).length;
-    if (!error && !cancelled && request.taskKind === 'organize' && writeToolCalls === 0) {
+    const writeToolCalls = toolDurations.filter((t) => WRITE_TOOL_NAMES.has(t.name) && t.status === 'completed').length;
+    if (!error && !cancelled && request.taskKind === 'organize' && (writeToolCalls === 0 || recorder.changes.length === 0)) {
       error =
-        'ORGANIZE_NO_WRITE_TOOL: 整理任务未调用任何写入工具（可能被当成了讨论）。' +
+        'ORGANIZE_NO_WRITE_TOOL: 整理任务未产生任何实际写入（写入工具调用失败或未调用）。' +
         '已判定失败，未推进整理光标；请重试，或在附注中明确整理目标。';
     }
 

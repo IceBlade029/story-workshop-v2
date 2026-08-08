@@ -1,22 +1,31 @@
 /**
  * settings-store.test.ts — 全局设置（模型 / 思考模式 / 思考强度 / 完成通知）。
+ *
+ * P1 修复：生产路径必须可依赖注入——测试全部使用独立临时目录，
+ * 禁止触碰开发者的真实 ~/.story-workshop/settings.json。
  */
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { getSettings, saveSettings } from '../settings-store';
+import { configureSettingsDir, getSettings, saveSettings } from '../settings-store';
 
-const SETTINGS_DIR = path.join(os.homedir(), '.story-workshop');
-const SETTINGS_FILE = path.join(SETTINGS_DIR, 'settings.json');
+let SETTINGS_DIR: string;
+let SETTINGS_FILE: string;
 
-// 清掉上一次运行（含被中断）遗留的配置，保证「无配置文件」用例确定
 beforeEach(() => {
-  try { fs.rmSync(SETTINGS_FILE, { force: true }); } catch { /* noop */ }
+  SETTINGS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sw2-settings-'));
+  SETTINGS_FILE = path.join(SETTINGS_DIR, 'settings.json');
+  configureSettingsDir(SETTINGS_DIR);
 });
 
 afterEach(() => {
-  try { fs.rmSync(SETTINGS_FILE, { force: true }); } catch { /* noop */ }
+  try { fs.rmSync(SETTINGS_DIR, { recursive: true, force: true }); } catch { /* noop */ }
+});
+
+afterAll(() => {
+  // 复位为生产默认路径（不影响真实文件：本测试从未触碰 os.homedir()）
+  configureSettingsDir(undefined);
 });
 
 describe('settings-store', () => {

@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileExists, readJsonFile, readMarkdownFile, writeJsonFile, writeMarkdownFile } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import { sha256 } from './hash';
 import { generateId } from './id';
 import type { Attachment } from '../../shared/types';
@@ -22,7 +23,7 @@ export class AttachmentRepository {
   }
 
   private contentFilePath(attachmentId: string): string {
-    return path.join(this.projectDir, 'attachments', `${attachmentId}.md`);
+    return resolveWithin(this.projectDir, 'attachments', `${assertSafeId(attachmentId, 'attachment')}.md`);
   }
 
   private readIndex(): Attachment[] {

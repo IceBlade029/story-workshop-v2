@@ -106,7 +106,13 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
   display: flex; align-items: center; gap: 16px; padding: 0 14px; height: 44px; flex-shrink: 0;
   border-bottom: 1px solid var(--border); background: var(--bg-panel);
 }
-.topbar-project { font-weight: 700; font-size: 14px; }
+.topbar-project {
+  font-weight: 700; font-size: 14px; background: none; border: none; cursor: pointer;
+  font-family: inherit; color: var(--text); padding: 6px 8px; border-radius: var(--radius-s);
+}
+.topbar-project:hover { background: var(--bg-subtle); }
+.topbar-project-wrap { position: relative; }
+.topbar-menu { position: absolute; top: 34px; left: 0; z-index: 50; min-width: 200px; }
 .topbar-tabs { display: flex; gap: 4px; }
 .topbar-tabs .tab { flex: none; padding: 8px 18px; border-radius: var(--radius-m) var(--radius-m) 0 0; border-bottom: 2px solid transparent; }
 .topbar-tabs .tab.active { border-bottom-color: var(--accent); }
@@ -220,6 +226,35 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
 .ctx-menu-item.danger { color: var(--danger); }
 .ctx-menu-item.danger:hover { background: var(--danger-bg); }
 
+/* ============================================================ 全局搜索（§6.9） */
+.search-dialog { width: min(560px, 90vw); max-height: 70vh; display: flex; flex-direction: column; }
+.search-dialog .dialog-body { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.search-dialog input { width: 100%; box-sizing: border-box; }
+.search-results { display: flex; flex-direction: column; gap: 10px; }
+.search-group-title { font-size: 11px; color: var(--text-weak); padding: 2px 4px; }
+.search-result {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-s);
+  background: var(--bg-subtle); cursor: pointer; font-family: inherit; color: var(--text);
+}
+.search-result:hover { border-color: var(--accent); background: var(--bg-hover); }
+.search-result-title { font-size: 12px; font-weight: 600; }
+.search-result-excerpt {
+  font-size: 11px; color: var(--text-secondary); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ============================================================ 错误边界（§6.11） */
+.error-boundary {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 40px; text-align: center;
+}
+.error-boundary-detail {
+  max-width: 560px; max-height: 200px; overflow: auto; font-size: 12px; color: var(--danger);
+  background: var(--danger-bg); padding: 8px 10px; border-radius: var(--radius-s);
+  white-space: pre-wrap; word-break: break-all;
+}
+
 /* 归档会话：只读提示条（完全只读，ux-review §4.5） */
 .archived-banner {
   display: flex; align-items: center; gap: 10px; padding: 12px 14px;
@@ -266,6 +301,8 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
 }
 .badge-ai { background: var(--warning-bg); color: var(--warning); }
 .badge-stale { background: var(--danger-bg); color: var(--danger); }
+.badge-error { background: var(--danger-bg); color: var(--danger); }
+.badge-muted { background: var(--bg-subtle); color: var(--text-weak); }
 .danger { color: var(--danger) !important; }
 
 /* ============================================================ 按钮 */
@@ -419,6 +456,19 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
   background: var(--bg-panel); border-radius: var(--radius-m);
 }
 .organize-result-head { display: flex; align-items: center; gap: 8px; }
+/* 编辑器保存状态指示（ux-review §6.8：持续显示替代 toast） */
+.save-indicator { font-size: 11px; padding: 1px 6px; border-radius: var(--radius-s); flex-shrink: 0; }
+.save-dirty { background: var(--warning-bg); color: var(--warning); }
+.save-saving { background: var(--bg-subtle); color: var(--text-secondary); }
+.save-ok { background: var(--success-bg); color: var(--success); }
+.save-error { background: var(--danger-bg); color: var(--danger); }
+/* 失败/取消的整理卡片（P1 修复：部分写入恢复入口） */
+.organize-result-failed { border-left-color: var(--danger); }
+.organize-result-error {
+  margin: 0; padding: 6px 8px; font-size: 12px; color: var(--danger);
+  background: var(--danger-bg); border-radius: var(--radius-s);
+  white-space: pre-wrap; word-break: break-all;
+}
 .organize-result-answer {
   max-height: 240px; overflow: auto; padding: 6px 8px;
   border: 1px dashed var(--border); border-radius: var(--radius-s); background: var(--bg-subtle);

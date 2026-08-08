@@ -11,6 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ensureDir, fileExists, readJsonFile, readMarkdownFile, writeJsonFile, writeMarkdownFile } from '../file-store';
+import { assertSafeFormat, assertSafeId, resolveWithin } from './path-safety';
 import type { OutputInfo } from '../../shared/ipc-types';
 
 export interface OutputIndexEntry {
@@ -30,7 +31,9 @@ export class OutputRepository {
   constructor(private readonly projectDir: string) {}
 
   private outputFilePath(sceneId: string, format: string): string {
-    return path.join(this.projectDir, 'outputs', `${sceneId}.${format}.md`);
+    const safeSceneId = assertSafeId(sceneId, 'scene');
+    const safeFormat = assertSafeFormat(format);
+    return resolveWithin(this.projectDir, 'outputs', `${safeSceneId}.${safeFormat}.md`);
   }
 
   private indexPath(): string {

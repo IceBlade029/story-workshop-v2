@@ -24,12 +24,12 @@ import type { ModelAdapter } from './model-types';
 import { persistRunRecord } from './run-recorder';
 import { generateId } from '../storage/id';
 
-/** 模型上下文预算（token；DeepSeek 64K，留足余量） */
-export const CONTEXT_BUDGET_TOKENS = 30_000;
+/** 模型上下文预算（token；DeepSeek V4 系列窗口 1M，留 10% 余量） */
+export const CONTEXT_BUDGET_TOKENS = 900_000;
 /** 预留窗口比例（§7.3 预留默认 ≈ 15%） */
 export const RESERVE_RATIO = 0.15;
-/** 回答空间预留（按模型输出上限） */
-export const MAX_OUTPUT_TOKENS = 4096;
+/** 回答空间预留（按模型输出上限；V4 最大 384K，这里保守取 8K 平衡成本） */
+export const MAX_OUTPUT_TOKENS = 8192;
 /** 最近保留原文的轮数（§7.3「最近几轮」） */
 export const RECENT_ROUNDS_KEPT = 6;
 /** 系统提示 + 工具描述的开销估算（token） */

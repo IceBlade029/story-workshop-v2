@@ -6,6 +6,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { assertSafeFormat } from '../storage/path-safety';
 
 export const BUILTIN_FORMAT_TEMPLATES: Record<string, string> = {
   novel: `# 小说格式指南
@@ -35,7 +36,8 @@ export class FormatTemplateRepository {
   read(format: string): string | null {
     if (this.extraDir) {
       try {
-        const file = path.join(this.extraDir, `${format}.md`);
+        const safeFormat = assertSafeFormat(format);
+        const file = path.join(this.extraDir, `${safeFormat}.md`);
         if (fs.existsSync(file)) {
           return fs.readFileSync(file, 'utf-8');
         }

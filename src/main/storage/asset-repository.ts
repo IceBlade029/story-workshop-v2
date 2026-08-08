@@ -11,6 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileExists, readJsonFile, readMarkdownFile, writeJsonFile, writeMarkdownFile } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import { sha256 } from './hash';
 import { generateId } from './id';
 import type { Asset } from '../../shared/types';
@@ -23,7 +24,7 @@ export class AssetRepository {
   }
 
   private contentFilePath(assetId: string): string {
-    return path.join(this.projectDir, 'world', `${assetId}.md`);
+    return resolveWithin(this.projectDir, 'world', `${assertSafeId(assetId, 'asset')}.md`);
   }
 
   private readIndex(): Asset[] {

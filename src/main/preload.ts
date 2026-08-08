@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     open: (dir: string) => ipcRenderer.invoke('project:open', dir),
     pickFolder: () => ipcRenderer.invoke('project:pickFolder'),
     delete: (dir: string) => ipcRenderer.invoke('project:delete', dir),
+    showInFolder: (dir: string) => ipcRenderer.invoke('project:showInFolder', dir),
+    rename: (dir: string, name: string) => ipcRenderer.invoke('project:rename', dir, name),
   },
   state: {
     get: () => ipcRenderer.invoke('state:get'),
@@ -54,6 +56,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     formats: () => ipcRenderer.invoke('output:formats'),
     list: (sceneId: string) => ipcRenderer.invoke('output:list', sceneId),
     read: (sceneId: string, format: string) => ipcRenderer.invoke('output:read', sceneId, format),
+    save: (sceneId: string, format: string, content: string) => ipcRenderer.invoke('output:save', sceneId, format, content),
+    versions: (sceneId: string, format: string) => ipcRenderer.invoke('output:versions', sceneId, format),
+    readVersion: (sceneId: string, format: string, snapshotId: string) => ipcRenderer.invoke('output:readVersion', sceneId, format, snapshotId),
+    export: (format: string, options: { includeTitles: boolean }) => ipcRenderer.invoke('output:export', format, options),
     applyRevise: (sceneId: string, format: string, start: number, end: number, replacement: string) =>
       ipcRenderer.invoke('output:applyRevise', sceneId, format, start, end, replacement),
     undoRevise: (sceneId: string, format: string) => ipcRenderer.invoke('output:undoRevise', sceneId, format),
@@ -74,6 +80,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   context: {
     inspect: () => ipcRenderer.invoke('context:inspect'),
     recompress: (focus?: string) => ipcRenderer.invoke('context:recompress', focus),
+  },
+  search: {
+    global: (query: string) => ipcRenderer.invoke('search:global', query),
   },
   nodeVersion: {
     list: (nodeId: string) => ipcRenderer.invoke('nodeVersion:list', nodeId),

@@ -168,6 +168,39 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
     expect(service.getState().runSummaries[0]?.snapshotId).toBe(result.runId); // 快照仍建，可回滚
   });
 
+  it('P1 修复：主进程互斥——运行中的第二个 run 被拒绝；项目切换被阻止；完成后复位', async () => {
+    const root = makeTempDir();
+    tempDirs.push(root);
+    let releaseGate = (): void => {};
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const blockingModel: ModelAdapter = {
+      provider: 'blocking',
+      async runTurn(): Promise<ModelTurn> {
+        await gate; // 阻塞首个 run，直到测试释放
+        return { type: 'final', answer: '完成', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const service = new AppService(() => blockingModel);
+    service.createProject(path.join(root, 'proj'), '测试项目');
+    service.sendMessage('hi');
+
+    // 第一个 run 阻塞在模型调用上（runActive 已在入口同步置位）
+    const first = service.run({ kind: 'chat' });
+    // 并发第二个 run → RUN_ALREADY_ACTIVE（chat / organize 同一守卫）
+    await expect(service.run({ kind: 'chat' })).rejects.toThrow('RUN_ALREADY_ACTIVE');
+    await expect(service.run({ kind: 'chat', scope: { type: 'unorganized' } })).rejects.toThrow('RUN_ALREADY_ACTIVE');
+    // 写作/改写任务同样被守卫
+    await expect(service.runDetailFill('s1', 'novel')).rejects.toThrow('RUN_ALREADY_ACTIVE');
+    // 运行中禁止切换/关闭项目
+    expect(() => service.closeProject()).toThrow('RUN_IN_PROGRESS');
+
+    // 释放 → 首个 run 完成，守卫复位，后续 run 正常
+    releaseGate();
+    await first;
+    const again = await service.run({ kind: 'chat' });
+    expect(again.error).toBeUndefined();
+  });
+
   it('调用详情（ux-review §4.7）：conversation/runs/<runId>.json 全任务记录', async () => {
     const service = makeService([
       { type: 'tool_calls', toolCalls: [toolCall('c1', 'read_node', { nodeId: 'overview' })], usage: usage(5, 1) },

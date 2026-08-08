@@ -4,10 +4,20 @@
  * 子树展开、run 完成后的模式切换。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { store } from '../store';
+import { store, registerEditorGuard } from '../store';
 import { setApiForTest } from '../api';
+import { confirmDiscardDialog } from '../components/ui/dialog';
 import type { RendererApi, ProjectState, RunStreamEvent } from '../../shared/ipc-types';
 import type { ChatMessage, ToolCallTrace } from '../../shared/types';
+
+// 未保存保护测试需要可控的三选一确认；其余测试不渲染 DialogHost，mock 安全
+vi.mock('../components/ui/dialog', () => ({
+  confirmDialog: vi.fn(async () => true),
+  confirmDiscardDialog: vi.fn(async () => 'discard'),
+  promptDialog: vi.fn(async () => null),
+}));
+
+const mockDiscard = confirmDiscardDialog as unknown as ReturnType<typeof vi.fn>;
 
 function msg(id: string, role: ChatMessage['role'], content: string, parentId?: string): ChatMessage {
   return { id, role, content, timestamp: 't', parentId };
@@ -19,9 +29,9 @@ function makeProject(overrides: Partial<ProjectState> = {}): ProjectState {
     name: '测试',
     outline: null,
     nodes: [
-      { id: 'v1', type: 'volume', title: '第一卷', parentId: null, depth: 0, hasDraft: true, hasOfficial: false, outputFormats: [] },
-      { id: 'c1', type: 'chapter', title: '第一章', parentId: 'v1', depth: 1, hasDraft: false, hasOfficial: false, outputFormats: [] },
-      { id: 'c2', type: 'chapter', title: '第二章', parentId: 'v1', depth: 1, hasDraft: true, hasOfficial: false, outputFormats: [] },
+      { id: 'v1', type: 'volume', title: '第一卷', parentId: null, depth: 0, hasDraft: true, hasOfficial: false, outputFormats: [], outputStale: [] },
+      { id: 'c1', type: 'chapter', title: '第一章', parentId: 'v1', depth: 1, hasDraft: false, hasOfficial: false, outputFormats: [], outputStale: [] },
+      { id: 'c2', type: 'chapter', title: '第二章', parentId: 'v1', depth: 1, hasDraft: true, hasOfficial: false, outputFormats: [], outputStale: [] },
     ],
     assets: [],
     attachments: [],
@@ -50,6 +60,8 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       open: vi.fn(async () => project),
       pickFolder: vi.fn(async () => null),
       delete: vi.fn(async () => {}),
+      showInFolder: vi.fn(async () => {}),
+      rename: vi.fn(async () => {}),
     },
     state: { get: vi.fn(async () => project) },
     outline: {
@@ -126,6 +138,7 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
 beforeEach(() => {
   // 重置 store 内部状态：通过重新导入模块不可行（单例），用 actions 清理
   setApiForTest(makeApi());
+  mockDiscard.mockClear();
 });
 
 describe('store — 派生视图', () => {
@@ -229,7 +242,7 @@ describe('store — run 流式事件', () => {
     expect(store.getState().lastOrganize).toBeNull();
   });
 
-  it('organize 失败（硬门禁/错误）：不产生结果卡片', async () => {
+  it('organize 失败（P1 修复）：进失败卡片（failed + 错误原因），可查看部分写入并回滚', async () => {
     setApiForTest(makeApi());
     await store.openProject('/proj');
     await store.startRun('organize', { scope: { type: 'unorganized' } });
@@ -238,8 +251,26 @@ describe('store — run 流式事件', () => {
       type: 'done',
       result: { runId: 'run_1', taskKind: 'organize', finalAnswer: '', turns: 1, toolCallCount: 0, changes: [], cancelled: false, error: 'ORGANIZE_NO_WRITE_TOOL: 整理任务未调用任何写入工具' },
     } as RunStreamEvent);
-    expect(store.getState().lastOrganize).toBeNull();
+    expect(store.getState().lastOrganize).toEqual({
+      runId: 'run_1',
+      finalAnswer: '',
+      failed: true,
+      error: 'ORGANIZE_NO_WRITE_TOOL: 整理任务未调用任何写入工具',
+    });
     await vi.waitFor(() => expect(store.getState().activeRun?.status).toBe('done'));
+  });
+
+  it('organize 取消（P1 修复）：进失败卡片（已取消 + 部分写入提示）', async () => {
+    setApiForTest(makeApi());
+    await store.openProject('/proj');
+    await store.startRun('organize', { scope: { type: 'unorganized' } });
+    store.applyRunEvent({
+      runId: 'run_1',
+      type: 'done',
+      result: { runId: 'run_1', taskKind: 'organize', finalAnswer: '', turns: 2, toolCallCount: 2, changes: [], cancelled: true },
+    } as RunStreamEvent);
+    expect(store.getState().lastOrganize).toMatchObject({ runId: 'run_1', failed: true });
+    expect(store.getState().lastOrganize?.error).toContain('已取消');
   });
 
   it('忽略非当前 runId 的事件', async () => {
@@ -442,5 +473,115 @@ describe('store — 项目删除（项目级，移到系统回收站）', () => 
     expect(store.getState().inputText).toBe('');
     expect(store.getState().pendingAttachments).toHaveLength(0);
     expect(list).toHaveBeenCalled();
+  });
+});
+
+describe('store — 项目切换（§6.10）', () => {
+  it('backToProjects：清空项目态并刷新列表', async () => {
+    store.reset();
+    const list = vi.fn(async () => [{ dir: '/proj', name: '测试', createdAt: 't' }]);
+    setApiForTest(makeApi({ project: { ...makeApi().project, list } }));
+    await store.openProject('/proj');
+    store.setWritingScene('s1');
+    await store.backToProjects();
+    expect(store.getState().project).toBeNull();
+    expect(store.getState().writingSceneId).toBeNull();
+    expect(store.getState().selected).toBeNull();
+    expect(list).toHaveBeenCalled();
+  });
+
+  it('renameProject：调用 API 并刷新状态名称', async () => {
+    const project = makeProject({ name: '新名' });
+    const stateGet = vi.fn(async () => project);
+    setApiForTest(makeApi({ state: { get: stateGet } }));
+    await store.openProject('/proj');
+    await store.renameProject('新名');
+    expect(store.getState().project?.name).toBe('新名');
+  });
+});
+
+describe('store — 未保存保护（ux-review §6.8）', () => {
+  it('脏编辑器 + 取消 → 不切换', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: async () => true });
+    mockDiscard.mockResolvedValueOnce('cancel');
+    await store.selectNode('c2');
+    expect(store.getState().selected?.id).toBe('v1');
+    unreg();
+  });
+
+  it('保存并继续 → 调用 save 后切换', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const saveFn = vi.fn(async () => true);
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: saveFn });
+    mockDiscard.mockResolvedValueOnce('save');
+    await store.selectNode('c2');
+    expect(saveFn).toHaveBeenCalled();
+    expect(store.getState().selected).toEqual({ kind: 'node', id: 'c2' });
+    unreg();
+  });
+
+  it('放弃修改 → 不保存直接切换', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const saveFn = vi.fn(async () => true);
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: saveFn });
+    mockDiscard.mockResolvedValueOnce('discard');
+    await store.selectNode('c2');
+    expect(saveFn).not.toHaveBeenCalled();
+    expect(store.getState().selected?.id).toBe('c2');
+    unreg();
+  });
+
+  it('保存失败 → 不导航（保留本地内容重试）', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: async () => false });
+    mockDiscard.mockResolvedValueOnce('save');
+    await store.selectNode('c2');
+    expect(store.getState().selected?.id).toBe('v1');
+    unreg();
+  });
+
+  it('不脏的编辑器不拦截', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => false, save: async () => true });
+    await store.selectNode('c2');
+    expect(store.getState().selected?.id).toBe('c2');
+    unreg();
+  });
+
+  it('key 不匹配不拦截（切设定不影响草稿）', async () => {
+    await store.openProject('/proj');
+    await store.selectNode('v1');
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: async () => true });
+    await store.selectAsset('a1');
+    await store.selectAsset('a2');
+    expect(store.getState().selected?.id).toBe('a2');
+    expect(mockDiscard).not.toHaveBeenCalled();
+    unreg();
+  });
+
+  it('setWritingScene：输出/视图守卫拦截；确认后切换', async () => {
+    await store.openProject('/proj');
+    store.setWritingScene('s1');
+    const unreg = registerEditorGuard({ key: 'output:s1:novel', isDirty: () => true, save: async () => true });
+    mockDiscard.mockResolvedValueOnce('discard');
+    await store.setWritingScene('s2');
+    expect(store.getState().writingSceneId).toBe('s2');
+    unreg();
+  });
+
+  it('hasDirtyEditors：关窗检查（脏=true；清除/不脏=false）', async () => {
+    const unreg = registerEditorGuard({ key: 'draft:v1', isDirty: () => true, save: async () => true });
+    expect(store.hasDirtyEditors()).toBe(true);
+    unreg();
+    expect(store.hasDirtyEditors()).toBe(false);
+    const clean = registerEditorGuard({ key: 'draft:v1', isDirty: () => false, save: async () => true });
+    expect(store.hasDirtyEditors()).toBe(false);
+    clean();
   });
 });

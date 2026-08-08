@@ -9,8 +9,8 @@
  * - 空态 = 项目概况（大纲节点数 / 设定数 / 输出数等轻统计，静态信息）。
  */
 import React from 'react';
-import { store, useStore } from '../store';
-import { confirmDialog, promptDialog } from './ui/dialog';
+import { store, useStore, registerEditorGuard } from '../store';
+import { confirmDialog, promptDialog, selectDialog } from './ui/dialog';
 import { MarkdownEditor } from './ui/MarkdownEditor';
 import { MarkdownView } from './ui/MarkdownView';
 import type { NodeSummary, NodeVersion } from '../../shared/ipc-types';
@@ -93,6 +93,35 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
   /** 草稿是否相对「已保存状态」有未保存修改（§用户反馈：保存后按钮变灰，改动后重新亮起）。 */
   const draftChanged = draft !== savedDraft;
 
+  // 脏状态经 ref 暴露给守卫（避免注册闭包陈旧）
+  const draftRef = React.useRef(draft);
+  draftRef.current = draft;
+  const savedDraftRef = React.useRef(savedDraft);
+  savedDraftRef.current = savedDraft;
+
+  /** 保存草稿（带反馈；返回是否成功）。 */
+  const saveDraft = React.useCallback(async (): Promise<boolean> => {
+    if (draftRef.current === savedDraftRef.current) return true;
+    try {
+      await store.writeDraft(node.id, draftRef.current);
+      setSavedDraft(draftRef.current);
+      store.showToast('草稿已保存', 'success');
+      return true;
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+      return false;
+    }
+  }, [node.id]);
+
+  // 未保存保护注册（ux-review §6.8）
+  React.useEffect(() => {
+    return registerEditorGuard({
+      key: `draft:${node.id}`,
+      isDirty: () => draftRef.current !== savedDraftRef.current,
+      save: saveDraft,
+    });
+  }, [node.id, saveDraft]);
+
   /** 提交为正式版（§5.5）：先展示影响汇总，默认排除带「待定：」标记的节点。 */
   const commit = async (): Promise<void> => {
     const ids = store.subtreeIds(node.id);
@@ -113,10 +142,18 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
   };
 
   const addChild = async (): Promise<void> => {
-    const type = await promptDialog({
+    // §6.11：中文类型选择（替代手输 volume/chapter/scene）
+    const type = await selectDialog({
       title: '新建子节点',
-      message: '类型（volume / chapter / scene）。场景下不允许再建子节点；卷下建场景会自动插入隐藏章（§3.1）。',
-      defaultValue: 'chapter',
+      message: node.type === 'scene'
+        ? '场景是叶子节点，不允许创建子节点。'
+        : `父节点「${node.title}」：卷下建场景会自动插入隐藏章（§3.1）。`,
+      options: [
+        { value: 'volume', label: '卷（大章节）' },
+        { value: 'chapter', label: '章' },
+        { value: 'scene', label: '场景（正文单位）' },
+      ],
+      defaultValue: node.type === 'scene' ? '' : node.type === 'volume' ? 'chapter' : 'scene',
     });
     if (!type) return;
     const title = await promptDialog({ title: '新节点标题', defaultValue: '' });
@@ -143,17 +180,6 @@ function NodeView({ node }: { node: NodeSummary }): React.ReactElement {
   const rename = async (): Promise<void> => {
     const title = await promptDialog({ title: '重命名', defaultValue: node.title });
     if (title && title !== node.title) void store.renameNode(node.id, title);
-  };
-
-  /** 保存草稿（带反馈：成功 toast + 失败原因；成功后按钮变灰，草稿再变更时重新亮起）。 */
-  const saveDraft = async (): Promise<void> => {
-    try {
-      await store.writeDraft(node.id, draft);
-      setSavedDraft(draft);
-      store.showToast('草稿已保存', 'success');
-    } catch (err) {
-      store.showToast((err as Error).message, 'error');
-    }
   };
 
   const activeTab = tab === 'draft' || tab === 'official' ? tab : 'draft';
@@ -234,21 +260,42 @@ function AssetView({ assetId }: { assetId: string }): React.ReactElement {
     setContent(asset?.content ?? '');
   }, [assetId, asset?.hash]);
 
+  // 脏状态经 ref 暴露给守卫（避免注册闭包陈旧）
+  const typeRef = React.useRef(type); typeRef.current = type;
+  const titleRef = React.useRef(title); titleRef.current = title;
+  const contentRef = React.useRef(content); contentRef.current = content;
+  const dirty = !!asset && (type !== asset.type || title !== asset.title || content !== asset.content);
+
+  /** 保存设定（带反馈；返回是否成功）。 */
+  const saveAsset = React.useCallback(async (): Promise<boolean> => {
+    if (!asset) return false;
+    try {
+      await store.updateAsset(asset.id, { type: typeRef.current, title: titleRef.current, content: contentRef.current });
+      store.showToast('设定已保存', 'success');
+      return true;
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+      return false;
+    }
+  }, [asset]);
+
+  // 未保存保护注册（ux-review §6.8）
+  React.useEffect(() => {
+    return registerEditorGuard({
+      key: `asset:${assetId}`,
+      isDirty: () => {
+        const a = store.getState().project?.assets.find((x) => x.id === assetId);
+        if (!a) return false;
+        return typeRef.current !== a.type || titleRef.current !== a.title || contentRef.current !== a.content;
+      },
+      save: saveAsset,
+    });
+  }, [assetId, saveAsset]);
+
   const remove = async (): Promise<void> => {
     if (!asset) return;
     const ok = await confirmDialog({ title: '删除该设定？', message: '删除后不可恢复（§3.6：设定写出来就是事实，错误靠快照回滚兜底）。', confirmText: '删除', danger: true });
     if (ok) void store.deleteAsset(asset.id);
-  };
-
-  /** 保存设定（带反馈：成功 toast + 失败原因）。 */
-  const save = async (): Promise<void> => {
-    if (!asset) return;
-    try {
-      await store.updateAsset(asset.id, { type, title, content });
-      store.showToast('设定已保存', 'success');
-    } catch (err) {
-      store.showToast((err as Error).message, 'error');
-    }
   };
 
   if (!asset) return <div className="workspace-body"><p className="muted">设定不存在。</p></div>;
@@ -283,10 +330,13 @@ function AssetView({ assetId }: { assetId: string }): React.ReactElement {
           placeholder="设定内容（markdown，自由格式）"
           value={content}
           onChange={setContent}
-          onSave={() => void save()}
+          onSave={() => void saveAsset()}
         />
         <div className="row">
-          <button className="primary" onClick={() => void save()}>保存</button>
+          <button className="primary" disabled={!dirty} onClick={() => void saveAsset()} title={dirty ? '保存设定' : '设定已是最新（改动后按钮重新亮起）'}>
+            保存
+          </button>
+          {dirty && <span className="save-indicator save-dirty">未保存</span>}
           <button className="small-btn danger" onClick={() => void remove()}>删除</button>
         </div>
       </div>

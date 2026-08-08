@@ -14,6 +14,8 @@ export interface ConfirmOptions {
   cancelText?: string;
   /** 危险操作（按钮红色） */
   danger?: boolean;
+  /** 第三按钮文案（未保存保护用：保存并继续 / 放弃修改 / 取消） */
+  discardText?: string;
 }
 
 export interface PromptOptions {
@@ -27,9 +29,20 @@ export interface PromptOptions {
   danger?: boolean;
 }
 
+export interface SelectOptions {
+  title: string;
+  message?: string;
+  /** 选项列表（label 为显示文案，value 为返回值） */
+  options: Array<{ value: string; label: string }>;
+  defaultValue?: string;
+  confirmText?: string;
+  cancelText?: string;
+}
+
 type Request =
   | ({ kind: 'confirm' } & ConfirmOptions)
-  | ({ kind: 'prompt' } & PromptOptions);
+  | ({ kind: 'prompt' } & PromptOptions)
+  | ({ kind: 'select' } & SelectOptions);
 
 type Resolver = (value: boolean | string | null) => void;
 
@@ -56,6 +69,17 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   });
 }
 
+/** 三选一确认（未保存保护）：'save'（保存并继续）/ 'discard'（放弃修改）/ 'cancel'（取消）。 */
+export type DiscardChoice = 'save' | 'discard' | 'cancel';
+
+export function confirmDiscardDialog(opts: ConfirmOptions & { discardText: string }): Promise<DiscardChoice> {
+  return new Promise((resolve) => {
+    current = { kind: 'confirm', ...opts };
+    resolver = (v) => resolve(v === true ? 'save' : v === 'discard' ? 'discard' : 'cancel');
+    notify();
+  });
+}
+
 export function promptDialog(opts: PromptOptions): Promise<string | null> {
   return new Promise((resolve) => {
     current = { kind: 'prompt', ...opts };
@@ -64,9 +88,19 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
   });
 }
 
+/** 单选项选择（§6.11：新建子节点类型等）；取消返回 null。 */
+export function selectDialog(opts: SelectOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    current = { kind: 'select', ...opts };
+    resolver = (v) => resolve(typeof v === 'string' && v !== '' ? v : null);
+    notify();
+  });
+}
+
 export function DialogHost(): React.ReactElement | null {
   const [, force] = React.useReducer((x: number) => x + 1, 0);
   const [promptValue, setPromptValue] = React.useState('');
+  const [selected, setSelected] = React.useState('');
 
   React.useEffect(() => {
     listeners.add(force);
@@ -75,6 +109,7 @@ export function DialogHost(): React.ReactElement | null {
 
   React.useEffect(() => {
     setPromptValue((current?.kind === 'prompt' ? current.defaultValue : '') ?? '');
+    setSelected(current?.kind === 'select' ? (current.defaultValue ?? current.options[0]?.value ?? '') : '');
   }, [current]);
 
   if (!current) return null;
@@ -107,14 +142,26 @@ export function DialogHost(): React.ReactElement | null {
             />
           </div>
         )}
+        {req.kind === 'select' && (
+          <div className="dialog-body">
+            <select value={selected} onChange={(e) => setSelected(e.target.value)}>
+              {req.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        )}
         <div className="dialog-actions">
+          {req.kind === 'confirm' && req.discardText && (
+            <button className="small-btn" onClick={() => settle('discard')}>
+              {req.discardText}
+            </button>
+          )}
           <button className="small-btn" onClick={() => settle(req.kind === 'confirm' ? false : null)}>
             {req.cancelText ?? '取消'}
           </button>
           <button
-            className={req.danger ? 'small-btn danger' : 'primary'}
-            autoFocus={req.kind === 'confirm'}
-            onClick={() => settle(req.kind === 'confirm' ? true : promptValue)}
+            className={req.kind === 'confirm' && req.danger ? 'small-btn danger' : 'primary'}
+            autoFocus={req.kind === 'confirm' || req.kind === 'select'}
+            onClick={() => settle(req.kind === 'confirm' ? true : req.kind === 'select' ? selected : promptValue)}
           >
             {req.confirmText ?? (req.kind === 'confirm' ? '确认' : '确定')}
           </button>

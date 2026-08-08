@@ -21,8 +21,8 @@ function makeProject(): ProjectState {
     name: '测试项目',
     outline: null,
     nodes: [
-      { id: 'overview', type: 'overview', title: '总纲', parentId: null, depth: 0, hasDraft: false, hasOfficial: false, outputFormats: [] },
-      { id: 'c1', type: 'chapter', title: '第一章', parentId: 'overview', depth: 1, hasDraft: true, hasOfficial: false, outputFormats: [] },
+      { id: 'overview', type: 'overview', title: '总纲', parentId: null, depth: 0, hasDraft: false, hasOfficial: false, outputFormats: [], outputStale: [] },
+      { id: 'c1', type: 'chapter', title: '第一章', parentId: 'overview', depth: 1, hasDraft: true, hasOfficial: false, outputFormats: [], outputStale: [] },
     ],
     assets: [],
     attachments: [],
@@ -41,7 +41,7 @@ function makeApi(): RendererApi {
   const project = makeProject();
   return {
     app: { getVersion: vi.fn(async () => '0.1.0') },
-    project: { list: vi.fn(async () => []), create: vi.fn(async () => project), open: vi.fn(async () => project), pickFolder: vi.fn(async () => null), delete: vi.fn(async () => {}) },
+    project: { list: vi.fn(async () => []), create: vi.fn(async () => project), open: vi.fn(async () => project), pickFolder: vi.fn(async () => null), delete: vi.fn(async () => {}), showInFolder: vi.fn(async () => {}), rename: vi.fn(async () => {}) },
     state: { get: vi.fn(async () => project) },
     outline: {
       createNode: vi.fn(async () => project),
@@ -64,6 +64,8 @@ function makeApi(): RendererApi {
     visibleView: { read: vi.fn(async () => null), generate: vi.fn(async () => project), save: vi.fn(async () => project) },
     output: {
       formats: vi.fn(async () => ['novel']), list: vi.fn(async () => []), read: vi.fn(async () => ''),
+      save: vi.fn(async () => project), versions: vi.fn(async () => []), readVersion: vi.fn(async () => ''),
+      export: vi.fn(async () => ({ saved: false, canceled: true, missing: [] })),
       applyRevise: vi.fn(async () => project), undoRevise: vi.fn(async () => project),
     },
     conversation: {
@@ -73,6 +75,7 @@ function makeApi(): RendererApi {
       switchBranch: vi.fn(async () => project), edit: vi.fn(async () => project),
     },
     context: { inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 30000, estimatedTokens: 50, compressed: false, keptRawCount: 2, blocked: false })), recompress: vi.fn(async () => project) },
+    search: { global: vi.fn(async () => []) },
     nodeVersion: { list: vi.fn(async () => []), read: vi.fn(async () => '') },
     trash: { restore: vi.fn(async () => project), purge: vi.fn(async () => project) },
     run: {

@@ -1,4 +1,6 @@
 import { describe, it, expect, afterAll } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
 import { createAgentRuntime, type AgentRuntime } from '../../agent-runtime/agent-factory';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../../agent-runtime/scripted-model-adapter';
 import { ProjectWorkspace } from '../../storage/workspace';
@@ -368,6 +370,44 @@ describe('E2E — organize（写入 + 变更摘要 + 回滚/接受）', () => {
     expect(workspace.snapshots.hasSnapshot(result.runId)).toBe(true);
     // 沙箱化：日志零新增
     expect(workspace.conversation.readMessages()).toHaveLength(1);
+  });
+
+  it('P1 修复：失败的写入调用不通过门禁（只统计 completed）', async () => {
+    const { workspace, runtime } = setup([
+      // write_draft 目标节点不存在 → 工具失败；随后直接收尾
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'write_draft', { nodeId: 'ghost', content: 'x' })], usage: usage(5, 2) },
+      { type: 'final', answer: '整理完成。', usage: usage(10, 2) },
+    ]);
+    workspace.conversation.appendMessage(userMessage('m1', '整理'));
+    const result = await runtime.coordinator.run({
+      taskKind: 'organize',
+      messages: [userMessage('m1', '整理')],
+    });
+    // 失败的写调用不计入 → 门禁判定未执行整理
+    expect(result.writeToolCalls).toBe(0);
+    expect(result.error).toContain('ORGANIZE_NO_WRITE_TOOL');
+    expect(result.changes).toHaveLength(0);
+    expect(workspace.conversation.getOrganizeCursor()).toBeUndefined();
+  });
+
+  it('P0 修复：非法参数（穿越 nodeId）→ INVALID_ARGS 工具失败，不落盘不写树', async () => {
+    const { workspace, runtime } = setup([
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'create_node', { type: 'volume', title: 'x', nodeId: '..\\..\\evil' })], usage: usage(5, 2) },
+      { type: 'tool_calls', toolCalls: [toolCall('c2', 'create_node', { type: 'volume', title: '第一卷', nodeId: 'v1' })], usage: usage(10, 2) },
+      { type: 'final', answer: '完成。', usage: usage(15, 2) },
+    ]);
+    workspace.conversation.appendMessage(userMessage('m1', '整理'));
+    const result = await runtime.coordinator.run({
+      taskKind: 'organize',
+      messages: [userMessage('m1', '整理')],
+    });
+    expect(result.error).toBeUndefined();
+    // 非法调用被拒绝（INVALID_ARGS），合法调用照常执行 → 门禁通过
+    expect(result.writeToolCalls).toBe(1);
+    expect(workspace.outline.findNode('v1')).not.toBeNull();
+    expect(workspace.outline.findNode('..\\..\\evil')).toBeNull();
+    const outside = path.join(path.dirname(workspace.dir), 'evil.md');
+    expect(fs.existsSync(outside)).toBe(false);
   });
 });
 

@@ -11,13 +11,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileExists, readJsonFile, writeJsonFile } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import type { VisibleView } from '../../shared/types';
 
 export class VisibleViewRepository {
   constructor(private readonly projectDir: string) {}
 
   private viewFilePath(sceneId: string): string {
-    return path.join(this.projectDir, 'visible_views', `${sceneId}.json`);
+    return resolveWithin(this.projectDir, 'visible_views', `${assertSafeId(sceneId, 'scene')}.json`);
   }
 
   read(sceneId: string): VisibleView | null {

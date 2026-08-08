@@ -21,8 +21,8 @@
  * - 反馈重生成（全局）收进操作条，与就地改写（局部，§5.3 Phase 6）并列。
  */
 import React, { useEffect, useRef } from 'react';
-import { store, useStore } from '../store';
-import { confirmDialog } from './ui/dialog';
+import { store, useStore, registerEditorGuard } from '../store';
+import { confirmDialog, confirmDiscardDialog } from './ui/dialog';
 import { MarkdownView } from './ui/MarkdownView';
 import { CallInspectionDialog } from './ui/CallInspectionDialog';
 import type { NodeSummary } from '../../shared/ipc-types';
@@ -67,7 +67,10 @@ function SceneTreeItem({ node, depth, onSelect }: {
         )}
         <span className={`tree-type tree-type-${node.type}`}>{typeLabel[node.type] ?? node.type}</span>
         <span className="tree-title">{node.title}</span>
-        {isScene && node.visibleView?.exists && <span className="badge">视图</span>}
+        {/* §6.11 管道状态：缺视图 / 视图失效 / 正文失效 / 正文 ×N */}
+        {isScene && !node.visibleView?.exists && <span className="badge badge-muted">缺视图</span>}
+        {isScene && node.visibleView?.exists && node.visibleView.needsRegeneration && <span className="badge badge-stale">视图失效</span>}
+        {isScene && node.outputStale.length > 0 && <span className="badge badge-stale">正文失效</span>}
         {isScene && node.outputFormats.length > 0 && <span className="badge">正文 ×{node.outputFormats.length}</span>}
       </div>
       {open && visibleChildren.map((c) => <SceneTreeItem key={c.id} node={c} depth={depth + 1} onSelect={onSelect} />)}
@@ -83,13 +86,44 @@ function VisibleViewFold({ scene }: { scene: NodeSummary }): React.ReactElement 
   const [open, setOpen] = React.useState(true);
   const [view, setView] = React.useState<VisibleView | null>(null);
   const [text, setText] = React.useState('');
+  const [savedText, setSavedText] = React.useState('');
   const [source, setSource] = React.useState<string | null>(null);
   const [showCompare, setShowCompare] = React.useState(false);
+
+  // 脏状态经 ref 暴露给守卫（避免注册闭包陈旧）
+  const textRef = useRef(text);
+  textRef.current = text;
+  const savedTextRef = useRef(savedText);
+  savedTextRef.current = savedText;
+  const dirty = text !== savedText;
+
+  const save = React.useCallback(async (): Promise<boolean> => {
+    if (textRef.current === savedTextRef.current) return true;
+    try {
+      await store.saveVisibleView(scene.id, textRef.current);
+      setSavedText(textRef.current);
+      store.showToast('已保存手改（该视图此后受保护，不静默覆盖）', 'success');
+      return true;
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+      return false;
+    }
+  }, [scene.id]);
+
+  // 未保存保护注册（ux-review §6.8）
+  useEffect(() => {
+    return registerEditorGuard({
+      key: `view:${scene.id}`,
+      isDirty: () => textRef.current !== savedTextRef.current,
+      save,
+    });
+  }, [scene.id, save]);
 
   const reload = React.useCallback(async (): Promise<void> => {
     const v = await store.loadVisibleView(scene.id);
     setView(v);
     setText(v?.content ?? '');
+    setSavedText(v?.content ?? '');
     setSource(null);
     setShowCompare(false);
   }, [scene.id]);
@@ -106,14 +140,8 @@ function VisibleViewFold({ scene }: { scene: NodeSummary }): React.ReactElement 
     }
   };
 
-  const save = async (): Promise<void> => {
-    try {
-      await store.saveVisibleView(scene.id, text);
-      store.showToast('已保存手改（该视图此后受保护，不静默覆盖）', 'success');
-      await reload();
-    } catch (err) {
-      store.showToast((err as Error).message, 'error');
-    }
+  const saveView = async (): Promise<void> => {
+    await save();
   };
 
   const regenerate = async (): Promise<void> => {
@@ -161,7 +189,10 @@ function VisibleViewFold({ scene }: { scene: NodeSummary }): React.ReactElement 
           />
           {view && (
             <div className="row">
-              <button className="small-btn" onClick={() => void save()}>保存手改</button>
+              <button className="small-btn" disabled={!dirty} onClick={() => void saveView()} title={dirty ? '保存手改' : '已保存（改动后按钮重新亮起）'}>
+                保存手改
+              </button>
+              {dirty && <span className="save-indicator save-dirty">未保存</span>}
               <button className="tiny-btn" onClick={() => void toggleCompare()}>
                 {showCompare ? '收起对照' : '对照细纲'}
               </button>
@@ -198,6 +229,9 @@ function VisibleViewFold({ scene }: { scene: NodeSummary }): React.ReactElement 
 /** 就地改写预设动作（ux-review §5.3：预设 + 自定义同管道）。 */
 const REVISE_PRESETS = ['更有张力', '扩写', '精简', '润色'];
 
+/** 正文保存状态（ux-review §6.8：持续指示替代 toast 轰炸）。 */
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }): React.ReactElement {
   const project = useStore((s) => s.project);
   const activeRun = useStore((s) => s.activeRun);
@@ -206,6 +240,8 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
   const viewStatus = project?.nodes.find((n) => n.id === scene.id)?.visibleView;
   const [mode, setMode] = React.useState<'read' | 'edit'>('read');
   const [text, setText] = React.useState('');
+  const [savedText, setSavedText] = React.useState('');
+  const [saveState, setSaveState] = React.useState<SaveState>('idle');
   const [outputs, setOutputs] = React.useState<Array<{ format: string; stale: boolean }>>([]);
   const [feedbackOpen, setFeedbackOpen] = React.useState(false);
   const [feedback, setFeedback] = React.useState('');
@@ -214,17 +250,59 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
   const [customRevise, setCustomRevise] = React.useState(false);
   const [customText, setCustomText] = React.useState('');
   const [preview, setPreview] = React.useState<{ start: number; end: number } | null>(null);
+  const [historyOpen, setHistoryOpen] = React.useState(false);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
+
+  // 脏状态经 ref 暴露给守卫（避免注册闭包陈旧）
+  const textRef = useRef(text);
+  textRef.current = text;
+  const savedTextRef = useRef(savedText);
+  savedTextRef.current = savedText;
+  const dirty = text !== savedText;
+
+  /** 保存当前正文（写入前主进程建快照 → 版本历史）。返回是否成功。 */
+  const save = React.useCallback(async (): Promise<boolean> => {
+    if (textRef.current === savedTextRef.current) {
+      setSaveState('saved');
+      return true;
+    }
+    setSaveState('saving');
+    try {
+      await store.saveOutput(scene.id, format, textRef.current);
+      setSavedText(textRef.current);
+      setSaveState('saved');
+      return true;
+    } catch (err) {
+      setSaveState('error');
+      store.showToast((err as Error).message, 'error');
+      return false;
+    }
+  }, [scene.id, format]);
+
+  // 未保存保护注册（ux-review §6.8）
+  useEffect(() => {
+    return registerEditorGuard({
+      key: `output:${scene.id}:${format}`,
+      isDirty: () => textRef.current !== savedTextRef.current,
+      save,
+    });
+  }, [scene.id, format, save]);
 
   const reload = React.useCallback(async (): Promise<void> => {
     setOutputs(await store.loadOutputs(scene.id));
     const content = await store.readOutput(scene.id, format).catch(() => '');
     setText(content);
+    setSavedText(content);
+    setSaveState('idle');
   }, [scene.id, format]);
 
-  // 重新生成/反馈重生成/改写完成后刷新；编辑模式不覆盖用户输入
+  // 生成/改写完成或场景/格式切换（守卫已确认保存或放弃）后刷新；
+  // 用户有未保存修改时跳过（不覆盖本地输入）
   useEffect(() => {
-    if (!running && !revising) void reload();
+    if (!running && !revising) {
+      if (textRef.current !== savedTextRef.current) return; // 编辑中：保留本地输入
+      void reload();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, revising, activeRun?.runId, scene.id, format]);
 
@@ -277,6 +355,7 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
       .then(() => {
         store.showToast('改写已接受', 'success');
         setPreview(null);
+        void reload();
       })
       .catch((err) => store.showToast((err as Error).message, 'error'));
   };
@@ -285,6 +364,7 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
     try {
       await store.undoRevise(scene.id, format);
       store.showToast('已撤销上次改写', 'success');
+      void reload();
     } catch (err) {
       store.showToast((err as Error).message, 'error');
     }
@@ -295,6 +375,21 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
       () => store.showToast('全文已复制', 'success'),
       () => store.showToast('复制失败', 'error'),
     );
+  };
+
+  /** 完成编辑：脏内容自动保存后切回阅读模式。 */
+  const finishEdit = (): void => {
+    if (dirty) void save();
+    setMode('read');
+  };
+
+  const saveIndicator = (): React.ReactElement | null => {
+    switch (saveState) {
+      case 'saving': return <span className="save-indicator save-saving">保存中…</span>;
+      case 'saved': return <span className="save-indicator save-ok">已保存</span>;
+      case 'error': return <span className="save-indicator save-error">保存失败（内容已保留，可重试）</span>;
+      default: return dirty ? <span className="save-indicator save-dirty">未保存</span> : null;
+    }
   };
 
   return (
@@ -363,6 +458,12 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
             onSelect={onSelect}
             onMouseUp={onSelect}
             onKeyUp={onSelect}
+            onKeyDown={(e) => {
+              if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                void save();
+              }
+            }}
             placeholder="正文编辑模式：选中文本可就地改写（§5.3）"
           />
         </div>
@@ -371,13 +472,30 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
         <button className="tiny-btn" onClick={() => setMode(mode === 'read' ? 'edit' : 'read')}>
           {mode === 'read' ? '编辑' : '完成编辑'}
         </button>
-        <button className="tiny-btn" onClick={() => void undoLastRevise()} title="撤销上次改写（单级，§5.3）">
+        {mode === 'edit' && (
+          <button className="tiny-btn" disabled={!dirty || saveState === 'saving'} onClick={() => void save()} title="Ctrl+S 保存（写入前自动快照）">
+            保存
+          </button>
+        )}
+        <button className="tiny-btn" onClick={() => void undoLastRevise()} title="撤销上次改写（单级，§5.3；多级由版本历史兜底）">
           ↩ 撤销上次改写
         </button>
+        <button className="tiny-btn" onClick={() => setHistoryOpen(true)} title="正文版本历史（生成/改写/手工保存各成一版）">
+          版本历史
+        </button>
         {outputs.find((o) => o.format === format)?.stale && <span className="badge badge-stale">已失效（可见视图已变更）</span>}
+        {saveIndicator()}
         <span className="spacer" />
         <button className="small-btn" onClick={() => setFeedbackOpen(!feedbackOpen)}>基于反馈重写</button>
       </div>
+      {historyOpen && (
+        <OutputVersionDialog
+          scene={scene}
+          format={format}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => void reload()}
+        />
+      )}
       {feedbackOpen && (
         <div className="row">
           <textarea
@@ -396,6 +514,144 @@ function TextWorkspace({ scene, format }: { scene: NodeSummary; format: string }
   );
 }
 
+// --------------------------------------------------------------------------- 正文版本历史（ux-review §6.8：复用快照）
+
+function OutputVersionDialog({ scene, format, onClose, onRestored }: {
+  scene: NodeSummary;
+  format: string;
+  onClose: () => void;
+  onRestored: () => void;
+}): React.ReactElement {
+  const [versions, setVersions] = React.useState<Array<import('../../shared/ipc-types').OutputVersion> | null>(null);
+  const [preview, setPreview] = React.useState<{ snapshotId: string; content: string } | null>(null);
+
+  React.useEffect(() => {
+    void store.loadOutputVersions(scene.id, format).then(setVersions);
+  }, [scene.id, format]);
+
+  const view = async (snapshotId: string): Promise<void> => {
+    const content = await store.readOutputVersion(scene.id, format, snapshotId);
+    setPreview({ snapshotId, content });
+  };
+
+  /** 恢复 = 把版本内容作为当前正文保存（写入前自动建新快照，可继续回退）。 */
+  const restore = async (snapshotId: string): Promise<void> => {
+    if (!preview || preview.snapshotId !== snapshotId) return;
+    const ok = await confirmDialog({
+      title: '恢复该版本为当前正文？',
+      message: '当前正文将被该版本替换（写入前自动快照，可继续回退）。',
+      confirmText: '恢复',
+    });
+    if (!ok) return;
+    try {
+      await store.saveOutput(scene.id, format, preview.content);
+      store.showToast('已恢复该版本', 'success');
+      onRestored();
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+    }
+  };
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog-title">正文版本历史 · {scene.title}</h3>
+        <div className="dialog-body">
+          {versions === null && <p className="muted small">加载中…</p>}
+          {versions !== null && versions.length === 0 && (
+            <p className="muted small">还没有版本。生成正文、接受改写或手工保存后，每一版都会出现在这里。</p>
+          )}
+          {versions !== null && versions.length > 0 && (
+            <ul className="changes">
+              {versions.map((v) => (
+                <li key={v.snapshotId}>
+                  <strong>{v.snapshotId === 'current' ? '当前版本' : v.snapshotId}</strong>
+                  <span className="muted small"> {new Date(v.createdAt).toLocaleString()}</span>
+                  <span className="muted small"> hash {v.hash.slice(0, 8)}…</span>
+                  <button className="tiny-btn" onClick={() => void view(v.snapshotId)}>查看</button>
+                  {v.snapshotId !== 'current' && preview?.snapshotId === v.snapshotId && (
+                    <button className="tiny-btn" onClick={() => void restore(v.snapshotId)}>恢复此版本</button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {preview && <div className="compare-block"><MarkdownView text={preview.content} /></div>}
+        </div>
+        <div className="dialog-actions">
+          <button className="small-btn" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- 导出成稿对话框（§6.7）
+
+function ExportDialog({ currentFormat, onClose }: {
+  currentFormat: string;
+  onClose: () => void;
+}): React.ReactElement {
+  const [formats, setFormats] = React.useState<string[]>([]);
+  const [format, setFormat] = React.useState(currentFormat);
+  const [includeTitles, setIncludeTitles] = React.useState(true);
+  const [missing, setMissing] = React.useState<Array<{ nodeId: string; title: string }> | null>(null);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    void store.loadFormats().then(setFormats);
+  }, []);
+
+  const run = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await store.exportBook(format, { includeTitles });
+      setMissing(result.missing);
+      if (result.saved) {
+        store.showToast(`已导出成稿：${result.path}`, 'success');
+        onClose();
+      }
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3 className="dialog-title">导出成稿</h3>
+        <div className="dialog-body">
+          <div className="row">
+            <span className="muted small">格式：</span>
+            <select value={format} onChange={(e) => setFormat(e.target.value)}>
+              {formats.map((f) => <option key={f} value={f}>{f === 'novel' ? '小说' : f === 'script' ? '剧本' : f}</option>)}
+            </select>
+            <label className="row">
+              <input type="checkbox" checked={includeTitles} onChange={(e) => setIncludeTitles(e.target.checked)} />
+              <span className="muted small">包含卷/章/场景标题</span>
+            </label>
+          </div>
+          <p className="muted small">按大纲顺序合并各场景正文（缺失正文的场景会列出，不阻断导出）。</p>
+          {missing !== null && !busy && (
+            missing.length === 0
+              ? <p className="muted small">全部场景正文完整。</p>
+              : <p className="muted small">缺失正文 {missing.length} 个场景：{missing.map((m) => m.title).join('、')}</p>
+          )}
+        </div>
+        <div className="dialog-actions">
+          <button className="small-btn" onClick={onClose}>取消</button>
+          <button className="primary" disabled={busy || !format} onClick={() => void run()}>
+            {busy ? '导出中…' : '导出…'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --------------------------------------------------------------------------- 模块
 
 export function WritingModule(): React.ReactElement {
@@ -406,8 +662,10 @@ export function WritingModule(): React.ReactElement {
   // 最近一次写作任务的调用详情入口（沙箱隔离后写作任务在讨论中零痕迹，§4.7）
   const lastWritingRunId = useStore((s) => s.lastWritingRunId);
   const [inspectOpen, setInspectOpen] = React.useState(false);
+  const [exportOpen, setExportOpen] = React.useState(false);
   const [formats, setFormats] = React.useState<string[]>([]);
   const [format, setFormat] = React.useState('');
+  const pendingFormat = useStore((s) => s.pendingWritingFormat);
 
   useEffect(() => {
     void store.loadFormats().then((f) => {
@@ -415,6 +673,23 @@ export function WritingModule(): React.ReactElement {
       setFormat((prev) => (prev && f.includes(prev) ? prev : f[0] ?? ''));
     });
   }, []);
+
+  // 全局搜索跳转（§6.9）：应用待定格式后清除
+  useEffect(() => {
+    if (!pendingFormat) return;
+    if (formats.includes(pendingFormat)) setFormat(pendingFormat);
+    store.clearPendingWritingFormat();
+  }, [pendingFormat, formats]);
+
+  /** 格式切换守卫（未保存保护，ux-review §6.8）。 */
+  const switchFormat = async (next: string): Promise<void> => {
+    if (next === format) return;
+    const ok = sceneId
+      ? await store.guardLeave((key) => key.startsWith(`output:${sceneId}:`) || key === `view:${sceneId}`)
+      : true;
+    if (!ok) return;
+    setFormat(next);
+  };
 
   if (!project) return <></>;
   const roots = project.nodes.filter((n) => n.parentId === null);
@@ -425,7 +700,7 @@ export function WritingModule(): React.ReactElement {
       <aside className="writing-scenes">
         <div className="ws-head"><h3>场景</h3><span className="muted small">只导航 · 选择后右侧操作</span></div>
         <div className="scene-tree">
-          {roots.map((n) => <SceneTreeItem key={n.id} node={n} depth={0} onSelect={(id) => store.setWritingScene(id)} />)}
+          {roots.map((n) => <SceneTreeItem key={n.id} node={n} depth={0} onSelect={(id) => void store.setWritingScene(id)} />)}
           {roots.length === 0 && <p className="muted small">还没有大纲节点。</p>}
         </div>
       </aside>
@@ -441,13 +716,16 @@ export function WritingModule(): React.ReactElement {
         ) : (
           <>
             <div className="writing-toolbar">
-              <select value={format} onChange={(e) => setFormat(e.target.value)} disabled={running}>
+              <select value={format} onChange={(e) => void switchFormat(e.target.value)} disabled={running}>
                 {formats.map((f) => <option key={f} value={f}>{f === 'novel' ? '小说' : f === 'script' ? '剧本' : f}</option>)}
               </select>
               <button className="primary" disabled={running} onClick={() => generate(scene.id, format)}>
                 {running ? '写作中…' : '生成正文'}
               </button>
               <button className="small-btn" onClick={() => void copy(scene.id, format)}>复制全文</button>
+              <button className="small-btn" onClick={() => setExportOpen(true)} title="按大纲顺序合并全部场景正文（§6.7）">
+                导出成稿…
+              </button>
               {lastWritingRunId && (
                 <button className="tiny-btn" onClick={() => setInspectOpen(true)} title="最近一次写作任务的调用详情（§4.7）">
                   ⓘ 调用详情
@@ -456,6 +734,7 @@ export function WritingModule(): React.ReactElement {
               <span className="muted small">输出落盘 outputs/（§6.5：正文生成只读可见视图 + 模板）</span>
             </div>
             {inspectOpen && lastWritingRunId && <CallInspectionDialog runId={lastWritingRunId} onClose={() => setInspectOpen(false)} />}
+            {exportOpen && <ExportDialog currentFormat={format} onClose={() => setExportOpen(false)} />}
             <VisibleViewFold scene={scene} />
             <TextWorkspace scene={scene} format={format} />
           </>

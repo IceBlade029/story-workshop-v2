@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileExists, readJsonFile, readMarkdownFile, writeJsonFile, writeMarkdownFile } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import { sha256 } from './hash';
 import { generateId } from './id';
 import type { OutlineNode, OutlineTree } from '../../shared/types';
@@ -202,11 +203,11 @@ export class OutlineRepository {
   // -------------------------------------------------------------- content
 
   private officialFilePath(nodeId: string): string {
-    return path.join(this.projectDir, 'nodes', `${nodeId}.md`);
+    return resolveWithin(this.projectDir, 'nodes', `${assertSafeId(nodeId, 'node')}.md`);
   }
 
   private draftFilePath(nodeId: string): string {
-    return path.join(this.projectDir, 'nodes', `${nodeId}.draft.md`);
+    return resolveWithin(this.projectDir, 'nodes', `${assertSafeId(nodeId, 'node')}.draft.md`);
   }
 
   readOfficial(nodeId: string): string {
@@ -262,7 +263,7 @@ export class OutlineRepository {
   // ------------------------------------------------------------------ meta
 
   private metaFilePath(nodeId: string): string {
-    return path.join(this.projectDir, 'nodes', `${nodeId}.meta.json`);
+    return resolveWithin(this.projectDir, 'nodes', `${assertSafeId(nodeId, 'node')}.meta.json`);
   }
 
   /** 读取节点 meta；不存在时返回默认空 meta（不写入磁盘）。 */

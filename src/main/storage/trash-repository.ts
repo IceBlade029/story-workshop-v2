@@ -14,6 +14,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ensureDir, fileExists, readJsonFile, writeJsonFile } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import { generateId } from './id';
 import { OutlineRepository } from './outline-repository';
 import type { OutlineNode, NodeType } from '../../shared/types';
@@ -40,7 +41,7 @@ export class TrashRepository {
   }
 
   private entryDir(trashId: string): string {
-    return path.join(this.trashDir(), trashId);
+    return path.join(this.trashDir(), assertSafeId(trashId, 'trash'));
   }
 
   private readIndex(): StoredTrashEntry[] {
@@ -168,17 +169,18 @@ export class TrashRepository {
 
   /** 节点关联的全部文件路径（nodes/*、visible_views/*、outputs/*）。 */
   private nodeFiles(nodeId: string): string[] {
+    const safeId = assertSafeId(nodeId, 'node');
     const files: string[] = [
-      path.join(this.projectDir, 'nodes', `${nodeId}.md`),
-      path.join(this.projectDir, 'nodes', `${nodeId}.draft.md`),
-      path.join(this.projectDir, 'nodes', `${nodeId}.meta.json`),
-      path.join(this.projectDir, 'visible_views', `${nodeId}.json`),
+      path.join(this.projectDir, 'nodes', `${safeId}.md`),
+      path.join(this.projectDir, 'nodes', `${safeId}.draft.md`),
+      path.join(this.projectDir, 'nodes', `${safeId}.meta.json`),
+      path.join(this.projectDir, 'visible_views', `${safeId}.json`),
     ];
     const outputsDir = path.join(this.projectDir, 'outputs');
     try {
       for (const f of fs.readdirSync(outputsDir)) {
-        if (f.startsWith(`${nodeId}.`) && f.endsWith('.md')) {
-          files.push(path.join(outputsDir, f));
+        if (f.startsWith(`${safeId}.`) && f.endsWith('.md')) {
+          files.push(resolveWithin(this.projectDir, 'outputs', f));
         }
       }
     } catch {

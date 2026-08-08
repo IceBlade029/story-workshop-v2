@@ -44,6 +44,8 @@ export interface NodeSummary {
   };
   /** 已生成的正文媒介列表（§3.5） */
   outputFormats: string[];
+  /** 因可见视图变更而失效的输出格式（§3.5/§6.11 管道状态） */
+  outputStale: string[];
 }
 
 /** 正文输出条目（§3.5：可见视图变更后 stale=true） */
@@ -67,6 +69,34 @@ export interface NodeVersion {
   snapshotId: string;
   createdAt: string;
   hash: string;
+}
+
+/** 正文版本历史的一页（§6.5 修订：运行快照/手工保存快照中该场景输出文件） */
+export interface OutputVersion {
+  snapshotId: string;
+  createdAt: string;
+  hash: string;
+}
+
+/** 整书导出结果（§6.7）：保存对话框取消 / 缺失场景清单（不阻断） */
+export interface ExportBookResult {
+  saved: boolean;
+  canceled?: boolean;
+  path?: string;
+  missing: Array<{ nodeId: string; title: string }>;
+}
+
+/** 全局搜索结果条目（§6.9：跨大纲/设定/对话/附件/正文/可见视图） */
+export interface GlobalSearchResult {
+  kind: 'node' | 'asset' | 'conversation' | 'attachment' | 'output' | 'visible_view';
+  /** 目标 id（节点/设定/消息/附件/场景） */
+  id: string;
+  /** 展示标题（节点标题 / 设定标题 / 会话摘要 / 附件名 / 场景标题+格式） */
+  title: string;
+  /** 匹配片段（命中上下文） */
+  excerpt: string;
+  /** 跳转附加信息（如输出格式 / 所属会话） */
+  meta?: string;
 }
 
 /** 回收站条目（§9.4：节点删除进回收站，永久删除需单独确认） */
@@ -200,6 +230,10 @@ export interface RendererApi {
     pickFolder(): Promise<string | null>;
     /** 删除项目（确认后移到系统回收站，可恢复）；打开中的项目会自动关闭 */
     delete(dir: string): Promise<void>;
+    /** 在系统文件管理器中显示项目目录 */
+    showInFolder(dir: string): Promise<void>;
+    /** 重命名项目（仅更新 project.json 中的名称，目录名不变） */
+    rename(dir: string, name: string): Promise<void>;
   };
   state: {
     get(): Promise<ProjectState>;
@@ -248,6 +282,14 @@ export interface RendererApi {
     list(sceneId: string): Promise<OutputInfo[]>;
     /** 读取正文内容 */
     read(sceneId: string, format: string): Promise<string>;
+    /** 手工保存正文（写入前快照，可回滚/进版本历史） */
+    save(sceneId: string, format: string, content: string): Promise<ProjectState>;
+    /** 正文版本历史（生成/改写/手工保存各成一版） */
+    versions(sceneId: string, format: string): Promise<OutputVersion[]>;
+    /** 读取某版本正文内容 */
+    readVersion(sceneId: string, format: string, snapshotId: string): Promise<string>;
+    /** 整书导出（保存对话框选路径）；缺失场景不阻断 */
+    export(format: string, options: { includeTitles: boolean }): Promise<ExportBookResult>;
     /** 接受就地改写（§5.3：替换 = 新文本替换原选区，写入前快照，单级撤销） */
     applyRevise(sceneId: string, format: string, start: number, end: number, replacement: string): Promise<ProjectState>;
     /** 撤销上次改写（§5.3：单级；多级由版本历史兜底） */
@@ -276,6 +318,10 @@ export interface RendererApi {
     inspect(): Promise<ContextInspection>;
     /** 手动重新压缩（可指定重点；只影响摘要详略，§7.3）。清除压缩阻断标记。 */
     recompress(focus?: string): Promise<ProjectState>;
+  };
+  search: {
+    /** 全局搜索（大纲/设定/对话/附件/正文/可见视图；§6.9） */
+    global(query: string): Promise<GlobalSearchResult[]>;
   };
   nodeVersion: {
     /** 节点版本历史（§5.5：正式版内容的各版快照） */

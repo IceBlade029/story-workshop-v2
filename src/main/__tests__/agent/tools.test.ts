@@ -1,4 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
+import * as fs from 'fs';
 import * as path from 'path';
 import { createAgentRuntime } from '../../agent-runtime/agent-factory';
 import { ScriptedModelAdapter } from '../../agent-runtime/scripted-model-adapter';
@@ -268,5 +269,72 @@ describe('工具 — 可见视图与正文（§8.2）', () => {
     expect(runtime.workspace.outputs.read('s1', 'novel')).toBe('正文');
     expect(runtime.workspace.outputs.listFormatsForScene('s1')).toEqual(['novel']);
     expect(path.basename(runtime.workspace.dir)).toBe('proj');
+  });
+
+  it('P1：allowedSceneId/allowedFormat 生效时，越界场景/格式硬性拒绝', async () => {
+    const { runtime, ctx } = makeCtx();
+    const scopedCtx: ToolContext = { ...ctx, allowedSceneId: 's1', allowedFormat: 'novel' };
+    runtime.workspace.visibleViews.write({
+      sceneId: 's1', content: '目标场景视图', sourceHash: 'h1', userEdited: false, needsRegeneration: false, generatedAt: 't',
+    });
+    runtime.workspace.visibleViews.write({
+      sceneId: 's2', content: '其他场景视图（不应被读到）', sourceHash: 'h2', userEdited: false, needsRegeneration: false, generatedAt: 't',
+    });
+
+    // 读其他场景 → SCENE_OUT_OF_SCOPE
+    const otherScene = await exec(runtime, scopedCtx, 'read_visible_view', { sceneId: 's2' });
+    expect(otherScene.ok).toBe(false);
+    expect((otherScene.error as { code: string }).code).toBe('SCENE_OUT_OF_SCOPE');
+
+    // 范围内场景正常读取
+    const ownScene = await exec(runtime, scopedCtx, 'read_visible_view', { sceneId: 's1' });
+    expect(ownScene.ok).toBe(true);
+    expect((ownScene.data as { content: string }).content).toBe('目标场景视图');
+
+    // 其他格式模板 → FORMAT_OUT_OF_SCOPE
+    const otherFormat = await exec(runtime, scopedCtx, 'read_format_template', { format: 'script' });
+    expect(otherFormat.ok).toBe(false);
+    expect((otherFormat.error as { code: string }).code).toBe('FORMAT_OUT_OF_SCOPE');
+    const ownFormat = await exec(runtime, scopedCtx, 'read_format_template', { format: 'novel' });
+    expect(ownFormat.ok).toBe(true);
+
+    // write_output 写其他场景 → 拒绝且不落盘
+    const wrongWrite = await exec(runtime, scopedCtx, 'write_output', { sceneId: 's2', format: 'novel', content: '不该写入' });
+    expect(wrongWrite.ok).toBe(false);
+    expect((wrongWrite.error as { code: string }).code).toBe('SCENE_OUT_OF_SCOPE');
+    expect(runtime.workspace.outputs.exists('s2', 'novel')).toBe(false);
+
+    // 范围内写入正常
+    const goodWrite = await exec(runtime, scopedCtx, 'write_output', { sceneId: 's1', format: 'novel', content: '正文' });
+    expect(goodWrite.ok).toBe(true);
+    expect(runtime.workspace.outputs.exists('s1', 'novel')).toBe(true);
+
+    // read_output（revise 用）同样绑定
+    const wrongRead = await exec(runtime, scopedCtx, 'read_output', { sceneId: 's1', format: 'script' });
+    expect(wrongRead.ok).toBe(false);
+    expect((wrongRead.error as { code: string }).code).toBe('FORMAT_OUT_OF_SCOPE');
+  });
+
+  it('P0：模型传入穿越 id → 工具失败且项目目录外无任何文件', async () => {
+    const { runtime, ctx } = makeCtx();
+    const traversal = '..\\..\\evil';
+
+    // create_node：工具层先校验 → 明确失败（不产生半写的大纲树）
+    const badNode = await exec(runtime, ctx, 'create_node', { type: 'volume', title: 'x', nodeId: traversal });
+    expect(badNode.ok).toBe(false);
+    expect((badNode.error as { code: string }).code).toBe('INVALID_NODE_ID');
+
+    // write_draft / write_asset：查找失败（节点/设定不存在）
+    const badDraft = await exec(runtime, ctx, 'write_draft', { nodeId: traversal, content: 'x' });
+    expect(badDraft.ok).toBe(false);
+    const badAsset = await exec(runtime, ctx, 'write_asset', { assetId: traversal, content: 'x' });
+    expect(badAsset.ok).toBe(false);
+
+    // write_output：仓库层安全校验抛错（run-loop 会转成工具失败结果）
+    await expect(exec(runtime, ctx, 'write_output', { sceneId: traversal, format: 'novel', content: 'x' })).rejects.toThrow();
+
+    // 项目目录外没有残留
+    const outside = path.join(path.dirname(runtime.workspace.dir), 'evil.md');
+    expect(fs.existsSync(outside)).toBe(false);
   });
 });

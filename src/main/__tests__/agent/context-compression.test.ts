@@ -42,11 +42,16 @@ class RecordingAdapter implements ModelAdapter {
   }
 }
 
-/** 构造一条足以触发压缩的长对话（每条约 850 字 ≈ 570 token）。 */
+/** 构造一条足以触发压缩的长对话（按当前预算动态放大；默认 40 条）。 */
 function longPath(count = 40): ChatMessage[] {
+  const headroom = CONTEXT_BUDGET_TOKENS - MAX_OUTPUT_TOKENS - Math.floor(CONTEXT_BUDGET_TOKENS * 0.15);
+  // 每条填充约 headroom*1.6/count token，整条路径 ≈ 1.6 倍 headroom（显著超预算）
+  const block = '这是一段足够长的讨论文本，';
+  const charsPerMsg = (headroom * 1.6 * 1.5) / count;
+  const body = block.repeat(Math.max(1, Math.ceil(charsPerMsg / block.length)));
   const path: ChatMessage[] = [];
   for (let i = 1; i <= count; i++) {
-    path.push(msg(`m${i}`, i % 2 === 1 ? 'user' : 'ai', `第 ${i} 轮讨论内容：${'这是一段足够长的讨论文本，'.repeat(60)}`, i > 1 ? `m${i - 1}` : undefined));
+    path.push(msg(`m${i}`, i % 2 === 1 ? 'user' : 'ai', `第 ${i} 轮讨论内容：${body}`, i > 1 ? `m${i - 1}` : undefined));
   }
   return path;
 }

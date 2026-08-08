@@ -4,6 +4,11 @@
  * detail_fill 白名单只有三个工具：read_visible_view（chat 共用，
  * §8.2）、read_format_template、write_output——物理上拿不到细纲、
  * 设定、材料（知识边界由白名单保证）。
+ *
+ * P1 修复（执行器层强制）：runDetailFill / runRevise 经 resourceScope
+ * 注入 allowedSceneId / allowedFormat，本模块所有工具执行时严格比对
+ * 模型传入值——越界读取（其他场景的可见视图、其他格式模板、其他场景
+ * 输出）一律拒绝，知识边界不再只是提示词。
  */
 import type { ToolContext, ToolSpec } from '../tool-types';
 import { OutputRepository } from '../../storage/output-repository';
@@ -12,6 +17,25 @@ import { FormatTemplateRepository } from '../templates';
 import { withProjectWriteLock } from '../../write-lock';
 import { ok, fail, viewEvidence } from './tool-utils';
 import { sha256 } from '../../storage/hash';
+
+/** 模型自定义 id 的安全字符集（与仓库层 assertSafeId 一致；P0 修复）。 */
+const SAFE_ID_PATTERN = '^[A-Za-z0-9_-]{1,80}$';
+const SAFE_FORMAT_PATTERN = '^[a-z0-9-]{1,32}$';
+
+/** 资源能力越界拒绝（allowedSceneId / allowedFormat 生效时）。 */
+function assertSceneInScope(ctx: ToolContext, sceneId: string): { ok: boolean; error?: ReturnType<typeof fail> } {
+  if (ctx.allowedSceneId !== undefined && sceneId !== ctx.allowedSceneId) {
+    return { ok: false, error: fail('SCENE_OUT_OF_SCOPE', `场景 ${sceneId} 不在本次任务范围内（仅允许 ${ctx.allowedSceneId}）。`) };
+  }
+  return { ok: true };
+}
+
+function assertFormatInScope(ctx: ToolContext, format: string): { ok: boolean; error?: ReturnType<typeof fail> } {
+  if (ctx.allowedFormat !== undefined && format !== ctx.allowedFormat) {
+    return { ok: false, error: fail('FORMAT_OUT_OF_SCOPE', `格式 ${format} 不在本次任务范围内（仅允许 ${ctx.allowedFormat}）。`) };
+  }
+  return { ok: true };
+}
 
 export function makeDetailTools(projectDir: () => string, templates?: FormatTemplateRepository): ToolSpec[] {
   const outputs = () => new OutputRepository(projectDir());
@@ -25,12 +49,14 @@ export function makeDetailTools(projectDir: () => string, templates?: FormatTemp
       inputSchema: {
         type: 'object',
         properties: {
-          sceneId: { type: 'string', description: '场景节点 id' },
+          sceneId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '场景节点 id' },
         },
         required: ['sceneId'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { sceneId: string }) {
+      async execute(ctx, args: { sceneId: string }) {
+        const scope = assertSceneInScope(ctx, args.sceneId);
+        if (!scope.ok) return scope.error!;
         const view = views().read(args.sceneId);
         if (!view) return ok({ exists: false, sceneId: args.sceneId });
         return ok(
@@ -54,12 +80,14 @@ export function makeDetailTools(projectDir: () => string, templates?: FormatTemp
       inputSchema: {
         type: 'object',
         properties: {
-          format: { type: 'string', description: '格式名：novel | script' },
+          format: { type: 'string', pattern: SAFE_FORMAT_PATTERN, description: '格式名：novel | script' },
         },
         required: ['format'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { format: string }) {
+      async execute(ctx, args: { format: string }) {
+        const scope = assertFormatInScope(ctx, args.format);
+        if (!scope.ok) return scope.error!;
         const content = templateRepo.read(args.format);
         if (content === null) {
           return fail('FORMAT_NOT_FOUND', `未知格式: ${args.format}（可用: ${templateRepo.listFormats().join(', ')}）`);
@@ -74,13 +102,17 @@ export function makeDetailTools(projectDir: () => string, templates?: FormatTemp
       inputSchema: {
         type: 'object',
         properties: {
-          sceneId: { type: 'string', description: '场景节点 id' },
-          format: { type: 'string', description: '格式名：novel | script' },
+          sceneId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '场景节点 id' },
+          format: { type: 'string', pattern: SAFE_FORMAT_PATTERN, description: '格式名：novel | script' },
         },
         required: ['sceneId', 'format'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { sceneId: string; format: string }) {
+      async execute(ctx, args: { sceneId: string; format: string }) {
+        const sceneScope = assertSceneInScope(ctx, args.sceneId);
+        if (!sceneScope.ok) return sceneScope.error!;
+        const formatScope = assertFormatInScope(ctx, args.format);
+        if (!formatScope.ok) return formatScope.error!;
         if (!outputs().exists(args.sceneId, args.format)) {
           return fail('OUTPUT_NOT_FOUND', `该场景还没有 ${args.format} 格式的正文（先生成正文）`);
         }
@@ -95,14 +127,21 @@ export function makeDetailTools(projectDir: () => string, templates?: FormatTemp
       inputSchema: {
         type: 'object',
         properties: {
-          sceneId: { type: 'string', description: '场景节点 id' },
-          format: { type: 'string', description: '格式名：novel | script' },
+          sceneId: { type: 'string', pattern: SAFE_ID_PATTERN, description: '场景节点 id' },
+          format: { type: 'string', pattern: SAFE_FORMAT_PATTERN, description: '格式名：novel | script' },
           content: { type: 'string', description: '正文全文' },
         },
         required: ['sceneId', 'format', 'content'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx: ToolContext, args: { sceneId: string; format: string; content: string }) {
+      async execute(ctx: ToolContext, args: { sceneId: string; format: string; content: string }) {
+        const sceneScope = assertSceneInScope(ctx, args.sceneId);
+        if (!sceneScope.ok) return sceneScope.error!;
+        const formatScope = assertFormatInScope(ctx, args.format);
+        if (!formatScope.ok) return formatScope.error!;
+        if (templateRepo.read(args.format) === null) {
+          return fail('FORMAT_NOT_FOUND', `未知格式: ${args.format}（可用: ${templateRepo.listFormats().join(', ')}）`);
+        }
         return withProjectWriteLock(projectDir(), () => {
           // 记录生成时所依据的可见视图 hash（§3.5 输出失效检测的依据）
           const view = views().read(args.sceneId);

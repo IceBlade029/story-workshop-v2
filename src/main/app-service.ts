@@ -7,6 +7,7 @@
  *
  * 与 electron 解耦（不 import electron），便于单元测试：注入 workspace 与 model。
  */
+import * as fs from 'fs';
 import * as path from 'path';
 import { ProjectWorkspace } from './storage/workspace';
 import { OutlineRepository, OVERVIEW_ROOT_ID } from './storage/outline-repository';
@@ -24,12 +25,13 @@ import {
 } from './agent-runtime/context-compression';
 import { generateId } from './storage/id';
 import { sha256 } from './storage/hash';
+import { assertSafeId, assertSafeFormat } from './storage/path-safety';
 import { saveApiKey, hasApiKey, loadApiKeyEntry } from './api-key-store';
 import { getSettings, saveSettings } from './settings-store';
 import type { AppSettings } from '../shared/llm-types';
 import type { ModelAdapter } from './agent-runtime/model-types';
 import type { RunResult, RunRequest } from './agent-runtime/run-loop';
-import type { ChangeItem, ChatMessage, Attachment, NodeType, ToolCallTrace, VisibleView } from '../shared/types';
+import type { ChangeItem, ChatMessage, Attachment, NodeType, OutlineNode, ToolCallTrace, VisibleView, ConversationSession } from '../shared/types';
 import type {
   CommitResult,
   NodeSummary,
@@ -62,8 +64,17 @@ export class AppService {
   private runtime: AgentRuntime | null = null;
   /** 当前项目的模型实例（压缩任务直接单轮调用，§7.3） */
   private model: ModelAdapter | null = null;
+  /** 主进程运行互斥（P1 修复）：同一时刻只允许一个 run 在跑。 */
+  private runActive = false;
 
   constructor(private readonly createModel: () => ModelAdapter) {}
+
+  /**
+   * 项目操作守卫（P1 修复）：run 进行中禁止切换/关闭/删除项目。
+   */
+  private assertNoActiveRun(): void {
+    if (this.runActive) throw new Error('RUN_IN_PROGRESS: 任务运行中，请等待完成或取消后再切换/关闭项目');
+  }
 
   get workspace(): ProjectWorkspace {
     if (!this.runtime) throw new Error('NO_PROJECT_OPEN');
@@ -87,6 +98,7 @@ export class AppService {
   // -------------------------------------------------------------- 项目
 
   createProject(projectDir: string, name: string): ProjectState {
+    this.assertNoActiveRun();
     const workspace = ProjectWorkspace.create(projectDir, name);
     this.model = this.createModel();
     this.runtime = createAgentRuntime(workspace, this.model);
@@ -94,6 +106,7 @@ export class AppService {
   }
 
   openProject(projectDir: string): ProjectState {
+    this.assertNoActiveRun();
     const workspace = ProjectWorkspace.open(projectDir);
     if (!workspace) throw new Error('NOT_A_PROJECT');
     this.model = this.createModel();
@@ -102,8 +115,152 @@ export class AppService {
   }
 
   closeProject(): void {
+    this.assertNoActiveRun();
     this.runtime = null;
     this.model = null;
+  }
+
+  /** 重命名项目（§6.10：仅更新 project.json 中的名称，目录名不变）。 */
+  renameProject(dir: string, name: string): ProjectState {
+    const n = name.trim();
+    if (!n) throw new Error('EMPTY_PROJECT_NAME');
+    if (this.runtime === null || this.dir !== dir) throw new Error('NO_PROJECT_OPEN');
+    this.workspace.project.rename(n);
+    return this.getState();
+  }
+
+  /**
+   * 全局搜索（§6.9）：跨大纲（标题/草稿/正式版）、设定、对话、附件正文、
+   * 已生成正文、可见视图。大小写不敏感子串匹配；每类上限 20 条。
+   */
+  globalSearch(query: string): Array<import('../shared/ipc-types').GlobalSearchResult> {
+    const ws = this.workspace;
+    const q = query.trim().toLowerCase();
+    if (q === '') return [];
+    const out: Array<import('../shared/ipc-types').GlobalSearchResult> = [];
+    const LIMIT = 20;
+    const matches = (text: string): boolean => text.toLowerCase().includes(q);
+    const excerpt = (text: string): string => {
+      const idx = text.toLowerCase().indexOf(q);
+      if (idx < 0) return text.slice(0, 100);
+      const start = Math.max(0, idx - 30);
+      return text.slice(start, Math.min(text.length, idx + q.length + 60));
+    };
+    const push = (r: import('../shared/ipc-types').GlobalSearchResult): boolean => {
+      if (out.length >= LIMIT) return false;
+      out.push(r);
+      return true;
+    };
+
+    // 1) 大纲节点：标题 → 草稿 → 正式版（命中一项即记录）
+    const tree = ws.outline.readTree();
+    if (tree) {
+      const walk = (node: OutlineNode): boolean => {
+        if (matches(node.title)) {
+          return push({ kind: 'node', id: node.id, title: node.title, excerpt: excerpt(node.title) });
+        }
+        const draft = ws.outline.hasDraft(node.id) ? ws.outline.readDraft(node.id) : '';
+        if (draft && matches(draft)) return push({ kind: 'node', id: node.id, title: node.title, excerpt: excerpt(draft) });
+        const official = ws.outline.hasOfficial(node.id) ? ws.outline.readOfficial(node.id) : '';
+        if (official && matches(official)) return push({ kind: 'node', id: node.id, title: node.title, excerpt: excerpt(official) });
+        for (const child of node.children) if (!walk(child)) return false;
+        return true;
+      };
+      walk(tree.root);
+    }
+
+    // 2) 设定：标题/类型/正文
+    for (const a of ws.assets.listAssets()) {
+      if (out.length >= LIMIT) break;
+      if (matches(a.title) || matches(a.type) || matches(a.content)) {
+        push({ kind: 'asset', id: a.id, title: a.title || '（未命名）', excerpt: excerpt(a.title + a.content) });
+      }
+    }
+
+    // 3) 对话消息（含归档会话）
+    const convMessages = ws.conversation.readMessages();
+    const sessions = ws.conversation.listSessions();
+    const byId = new Map(convMessages.map((m) => [m.id, m]));
+    const sessionOf = (m: { id: string; parentId?: string }): ConversationSession | null => {
+      let current: { id: string; parentId?: string } | undefined = byId.get(m.id);
+      while (current) {
+        if (!current.parentId || !byId.has(current.parentId)) {
+          const rootId = current.id;
+          return sessions.find((s) => ws.conversation.sessionRootMessageId(s) === rootId) ?? null;
+        }
+        current = byId.get(current.parentId);
+      }
+      return null;
+    };
+    for (const m of convMessages) {
+      if (out.length >= LIMIT) break;
+      if (!matches(m.content)) continue;
+      const session = sessionOf(m);
+      push({
+        kind: 'conversation',
+        id: m.id,
+        title: `消息 · ${m.role === 'user' ? '你' : 'AI'}`,
+        excerpt: excerpt(m.content),
+        meta: session ? session.title : undefined,
+      });
+    }
+
+    // 4) 附件正文（meta 带第一条引用它的消息 id，供跳转定位）
+    for (const meta of ws.attachments.listAttachments()) {
+      if (out.length >= LIMIT) break;
+      const read = ws.attachments.readAttachment(meta.id);
+      if (!read) continue;
+      if (matches(read.content) || matches(meta.name)) {
+        const refMsg = convMessages.find((m) => m.refs?.attachmentIds?.includes(meta.id));
+        push({
+          kind: 'attachment',
+          id: meta.id,
+          title: meta.name,
+          excerpt: excerpt(read.content),
+          meta: refMsg ? `msg:${refMsg.id}` : undefined,
+        });
+      }
+    }
+
+    // 5) 已生成正文（outputs/<scene>.<format>.md）
+    try {
+      const outputsDir = path.join(ws.dir, 'outputs');
+      for (const f of fs.readdirSync(outputsDir)) {
+        if (out.length >= LIMIT) break;
+        if (!f.endsWith('.md')) continue;
+        const base = f.slice(0, -'.md'.length);
+        const dot = base.lastIndexOf('.');
+        if (dot <= 0) continue;
+        const sceneId = base.slice(0, dot);
+        const format = base.slice(dot + 1);
+        const content = fs.readFileSync(path.join(outputsDir, f), 'utf-8');
+        if (matches(content)) {
+          const node = ws.outline.findNode(sceneId);
+          push({ kind: 'output', id: sceneId, title: `${node?.title ?? sceneId}（${format}）`, excerpt: excerpt(content), meta: format });
+        }
+      }
+    } catch {
+      /* outputs 目录不存在 */
+    }
+
+    // 6) 可见视图
+    try {
+      const viewsDir = path.join(ws.dir, 'visible_views');
+      for (const f of fs.readdirSync(viewsDir)) {
+        if (out.length >= LIMIT) break;
+        if (!f.endsWith('.json')) continue;
+        const sceneId = f.slice(0, -'.json'.length);
+        const view = ws.visibleViews.read(sceneId);
+        if (view && matches(view.content)) {
+          const node = ws.outline.findNode(sceneId);
+          push({ kind: 'visible_view', id: sceneId, title: `${node?.title ?? sceneId} 的可见视图`, excerpt: excerpt(view.content) });
+        }
+      }
+    } catch {
+      /* visible_views 目录不存在 */
+    }
+
+    return out;
   }
 
   /**
@@ -116,7 +273,10 @@ export class AppService {
     const metaFile = path.join(dir, 'project.json');
     if (!fs.existsSync(metaFile)) throw new Error(`NOT_A_PROJECT: ${dir}`);
     const wasOpen = this.runtime !== null && this.dir === dir;
-    if (wasOpen) this.closeProject();
+    if (wasOpen) {
+      this.assertNoActiveRun();
+      this.closeProject();
+    }
     return { wasOpen };
   }
 
@@ -183,6 +343,13 @@ export class AppService {
       depth: number,
     ): void => {
       const meta = outline.readMeta(node.id);
+      const isScene = node.type === 'scene';
+      let outputStale: string[] = [];
+      if (isScene) {
+        const view = this.workspace.visibleViews.read(node.id);
+        const viewHash = view ? sha256(view.content) : null;
+        outputStale = outputs.listForScene(node.id, viewHash).filter((o) => o.stale).map((o) => o.format);
+      }
       out.push({
         id: node.id,
         type: node.type,
@@ -197,7 +364,8 @@ export class AppService {
         officialHash: meta.officialHash,
         updatedAt: meta.updatedAt,
         visibleView: meta.visibleView,
-        outputFormats: node.type === 'scene' ? outputs.listFormatsForScene(node.id) : [],
+        outputFormats: isScene ? outputs.listFormatsForScene(node.id) : [],
+        outputStale,
       });
       for (const child of node.children as Array<{ id: string; type: NodeType; title: string; children: unknown[]; hidden?: boolean; aiCreated?: boolean }>) {
         walk(child, node.id, depth + 1);
@@ -321,10 +489,13 @@ export class AppService {
       }
       const files = [
         path.join(ws.dir, 'outline.json'),
-        ...committed.flatMap((id) => [
-          path.join(ws.dir, 'nodes', `${id}.md`),
-          path.join(ws.dir, 'nodes', `${id}.meta.json`),
-        ]),
+        ...committed.flatMap((id) => {
+          const safeId = assertSafeId(id, 'node');
+          return [
+            path.join(ws.dir, 'nodes', `${safeId}.md`),
+            path.join(ws.dir, 'nodes', `${safeId}.meta.json`),
+          ];
+        }),
       ];
       ws.snapshots.createSnapshot(runId, files);
       ws.snapshots.pruneRetention();
@@ -473,6 +644,121 @@ export class AppService {
     return new FormatTemplateRepository().listFormats();
   }
 
+  /**
+   * 手工保存正文（§6.5 修订）：写入前快照（output-<ts>，含该输出文件与输出索引），
+   * 恢复/版本历史与失效检测（viewHash）保持一致。视图 hash 沿用当前可见视图
+   * ——可见视图未变则保存不产生失效标记。
+   */
+  saveOutput(sceneId: string, format: string, content: string): ProjectState {
+    const ws = this.workspace;
+    const node = ws.outline.findNode(sceneId);
+    if (!node) throw new Error(`NODE_NOT_FOUND: ${sceneId}`);
+    if (node.type !== 'scene') throw new Error(`NOT_SCENE_NODE: ${sceneId}`);
+    const safeId = assertSafeId(sceneId, 'scene');
+    const safeFormat = assertSafeFormat(format);
+    // 同一毫秒内多次保存会撞 id 覆盖快照（Date.now 粒度不够）→ 加随机后缀
+    const snapshotId = `output-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    ws.snapshots.createSnapshot(snapshotId, [
+      path.join(ws.dir, 'outputs', `${safeId}.${safeFormat}.md`),
+      path.join(ws.dir, 'outputs', 'index.json'),
+    ]);
+    // 首版保存（写前文件不存在）：快照目录里留空文件占位 → 版本历史保留
+    // 「保存前无正文」这一版（否则首版内容只存在于 HEAD，换版后丢失）。
+    const snapshotOutputFile = path.join(ws.dir, 'snapshots', snapshotId, 'outputs', `${safeId}.${safeFormat}.md`);
+    if (!fs.existsSync(snapshotOutputFile)) {
+      fs.mkdirSync(path.dirname(snapshotOutputFile), { recursive: true });
+      fs.writeFileSync(snapshotOutputFile, '', 'utf-8');
+    }
+    ws.snapshots.pruneRetention();
+    const view = ws.visibleViews.read(sceneId);
+    ws.outputs.write(sceneId, format, content, view ? sha256(view.content) : '');
+    return this.getState();
+  }
+
+  /**
+   * 正文版本历史（§6.5 修订）：扫描全部快照中该场景输出文件（生成/改写/手工保存
+   * 的写前快照各成一版），并把当前正文作为最新一版（snapshotId='current'）——
+   * 新建的第一版正文/最近一次改写没有写后快照，HEAD 保证它们始终在列表中。
+   */
+  listOutputVersions(sceneId: string, format: string): import('../shared/ipc-types').OutputVersion[] {
+    const ws = this.workspace;
+    const safeId = assertSafeId(sceneId, 'scene');
+    const safeFormat = assertSafeFormat(format);
+    const out: import('../shared/ipc-types').OutputVersion[] = [];
+    for (const snapshotId of ws.snapshots.listSnapshots()) {
+      const file = path.join(ws.dir, 'snapshots', snapshotId, 'outputs', `${safeId}.${safeFormat}.md`);
+      try {
+        if (!fs.existsSync(file)) continue;
+        const manifest = ws.snapshots.readManifest(snapshotId);
+        const content = fs.readFileSync(file, 'utf-8');
+        out.push({ snapshotId, createdAt: manifest?.createdAt ?? '', hash: sha256(content) });
+      } catch {
+        /* 跳过损坏快照 */
+      }
+    }
+    // HEAD：当前正文作为最新一版
+    const currentFile = path.join(ws.dir, 'outputs', `${safeId}.${safeFormat}.md`);
+    try {
+      if (fs.existsSync(currentFile)) {
+        out.unshift({
+          snapshotId: 'current',
+          createdAt: fs.statSync(currentFile).mtime.toISOString(),
+          hash: sha256(fs.readFileSync(currentFile, 'utf-8')),
+        });
+      }
+    } catch {
+      /* 读不到当前文件则只有快照版本 */
+    }
+    return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** 读取某版本快照中的正文内容；snapshotId='current' = 当前正文。 */
+  readOutputVersion(sceneId: string, format: string, snapshotId: string): string {
+    if (snapshotId === 'current') return this.workspace.outputs.read(sceneId, format);
+    const file = path.join(
+      this.workspace.dir,
+      'snapshots',
+      assertSafeId(snapshotId, 'snapshot'),
+      'outputs',
+      `${assertSafeId(sceneId, 'scene')}.${assertSafeFormat(format)}.md`,
+    );
+    if (!fs.existsSync(file)) throw new Error(`VERSION_NOT_FOUND: ${snapshotId}`);
+    return fs.readFileSync(file, 'utf-8');
+  }
+
+  /**
+   * 整书导出（§6.7）：按大纲树顺序合并各场景正文为单文件。
+   * 缺失正文的场景收集进 missing（不阻断导出）；标题可选包含
+   * （隐藏中间层级的章同样输出标题，与左栏显示一致）。
+   */
+  exportBook(format: string, options: { includeTitles: boolean }): { content: string; missing: Array<{ nodeId: string; title: string }> } {
+    const ws = this.workspace;
+    const safeFormat = assertSafeFormat(format);
+    const tree = ws.outline.readTree();
+    if (!tree) throw new Error('OUTLINE_NOT_INITIALIZED');
+    const missing: Array<{ nodeId: string; title: string }> = [];
+    const parts: string[] = [];
+    const walk = (node: OutlineNode, depth: number): void => {
+      if (node.type === 'scene') {
+        const content = ws.outputs.exists(node.id, safeFormat) ? ws.outputs.read(node.id, safeFormat) : '';
+        if (content.trim() === '') {
+          missing.push({ nodeId: node.id, title: node.title });
+        } else {
+          if (options.includeTitles && node.title) parts.push(`\n# ${node.title}\n`);
+          parts.push(content);
+        }
+        return;
+      }
+      if (options.includeTitles && node.title && node.type !== 'overview') {
+        parts.push(`\n${depth <= 1 ? '# ' : '## '}${node.title}\n`);
+      }
+      for (const child of node.children) walk(child, depth + 1);
+    };
+    walk(tree.root, 0);
+    const joined = parts.join('\n\n---\n\n').trim();
+    return { content: joined === '' ? '' : joined + '\n', missing };
+  }
+
   // -------------------------------------------------------------- 对话
 
   sendMessage(content: string): ProjectState {
@@ -593,6 +879,9 @@ export class AppService {
 
   /** 启动一次 run（chat / organize），返回结果；无内容可整理时 skippedReason。 */
   async run(req: RunStartRequest, hooks: AppRunHooks = {}, signal?: AbortSignal): Promise<AppRunResult> {
+    if (this.runActive) throw new Error('RUN_ALREADY_ACTIVE: 已有任务在运行，请先等待完成或取消');
+    this.runActive = true;
+    try {
     const ws = this.workspace;
     if (!this.runtime) throw new Error('NO_PROJECT_OPEN');
     // 归档守卫（ux-review §4.5）：归档会话完全只读，不能继续对话/整理
@@ -666,6 +955,9 @@ export class AppService {
       }
     }
     return result;
+    } finally {
+      this.runActive = false;
+    }
   }
 
   /**
@@ -857,6 +1149,9 @@ export class AppService {
    * 正文生成/改写的产物只留在 outputs/ 与调用详情记录里，讨论模块零痕迹。
    */
   async runDetailFill(sceneId: string, format: string, feedback?: string, hooks: AppRunHooks = {}, signal?: AbortSignal): Promise<RunResult> {
+    if (this.runActive) throw new Error('RUN_ALREADY_ACTIVE: 已有任务在运行，请先等待完成或取消');
+    this.runActive = true;
+    try {
     const ws = this.workspace;
     if (!this.runtime) throw new Error('NO_PROJECT_OPEN');
     const node = ws.outline.findNode(sceneId);
@@ -885,16 +1180,23 @@ export class AppService {
       taskKind: 'detail_fill',
       messages: [taskMessage],
       scope,
+      resourceScope: { sceneId, format },
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
+    } finally {
+      this.runActive = false;
+    }
   }
 
   /** 刷新：对最后一条 AI 消息重新生成，旧回复保留为兄弟分支（§3.2）。归档会话完全只读（ux-review §4.5）。 */
   async refreshMessage(messageId: string, hooks: AppRunHooks = {}): Promise<RunResult> {
+    if (this.runActive) throw new Error('RUN_ALREADY_ACTIVE: 已有任务在运行，请先等待完成或取消');
+    this.runActive = true;
+    try {
     if (this.isActiveSessionArchived()) throw new Error('SESSION_ARCHIVED');
     const conv = this.workspace.conversation;
     const target = conv.getMessage(messageId);
@@ -930,6 +1232,9 @@ export class AppService {
       onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
+    } finally {
+      this.runActive = false;
+    }
   }
 
   // -------------------------------------------------------------- 就地改写（revise，ux-review §5.3）
@@ -949,6 +1254,9 @@ export class AppService {
     hooks: AppRunHooks = {},
     signal?: AbortSignal,
   ): Promise<RunResult> {
+    if (this.runActive) throw new Error('RUN_ALREADY_ACTIVE: 已有任务在运行，请先等待完成或取消');
+    this.runActive = true;
+    try {
     const ws = this.workspace;
     if (!this.runtime) throw new Error('NO_PROJECT_OPEN');
     const node = ws.outline.findNode(sceneId);
@@ -989,12 +1297,16 @@ export class AppService {
       taskKind: 'revise',
       messages: [taskMessage],
       scope: `就地改写：${node.title} · ${format}（${instruction.slice(0, 40)}）`,
+      resourceScope: { sceneId, format },
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
+    } finally {
+      this.runActive = false;
+    }
   }
 
   /**
@@ -1008,7 +1320,7 @@ export class AppService {
     const content = ws.outputs.read(sceneId, format);
     if (start < 0 || end > content.length || start > end) throw new Error('INVALID_RANGE');
 
-    const outputFile = path.join(ws.dir, 'outputs', `${sceneId}.${format}.md`);
+    const outputFile = path.join(ws.dir, 'outputs', `${assertSafeId(sceneId, 'scene')}.${assertSafeFormat(format)}.md`);
     const snapshotId = `revise-${Date.now()}`;
     ws.snapshots.createSnapshot(snapshotId, [outputFile]);
 

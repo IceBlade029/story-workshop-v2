@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ensureDir, fileExists } from '../file-store';
+import { assertSafeId, resolveWithin } from './path-safety';
 import { generateId } from './id';
 import { sha256 } from './hash';
 
@@ -31,7 +32,7 @@ export class SnapshotRepository {
   constructor(private readonly projectDir: string) {}
 
   private snapshotDir(runId: string): string {
-    return path.join(this.projectDir, 'snapshots', runId);
+    return resolveWithin(this.projectDir, 'snapshots', assertSafeId(runId, 'snapshot'));
   }
 
   private manifestFilePath(runId: string): string {
@@ -198,9 +199,10 @@ export class SnapshotRepository {
    * 快照（提交快照 = 版本历史的一页；运行快照恰好含节点文件也算一页）。
    */
   listNodeVersions(nodeId: string): Array<{ snapshotId: string; createdAt: string; hash: string }> {
+    const safeId = assertSafeId(nodeId, 'node');
     const out: Array<{ snapshotId: string; createdAt: string; hash: string }> = [];
     for (const snapshotId of this.listSnapshots()) {
-      const file = path.join(this.snapshotDir(snapshotId), 'nodes', `${nodeId}.md`);
+      const file = resolveWithin(this.snapshotDir(snapshotId), 'nodes', `${safeId}.md`);
       if (!fileExists(file)) continue;
       const manifest = this.readManifest(snapshotId);
       const hash = sha256(fs.readFileSync(file, 'utf-8'));
@@ -211,7 +213,7 @@ export class SnapshotRepository {
 
   /** 读取某版本快照中的节点正式版内容；不存在返回 null。 */
   readNodeVersion(nodeId: string, snapshotId: string): string | null {
-    const file = path.join(this.snapshotDir(snapshotId), 'nodes', `${nodeId}.md`);
+    const file = resolveWithin(this.snapshotDir(snapshotId), 'nodes', `${assertSafeId(nodeId, 'node')}.md`);
     if (!fileExists(file)) return null;
     return fs.readFileSync(file, 'utf-8');
   }

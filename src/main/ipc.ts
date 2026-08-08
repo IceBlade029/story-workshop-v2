@@ -7,6 +7,7 @@
  * - run:cancel 维护 AbortController 注册表
  */
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import * as fs from 'fs';
 import * as path from 'path';
 import { AppService } from './app-service';
 import type { RunStartRequest } from '../shared/ipc-types';
@@ -68,6 +69,12 @@ export function registerIpcHandlers(service: AppService): void {
   });
 
   handle('project:open', (_event: Electron.IpcMainInvokeEvent, dir: string) => service.openProject(dir));
+
+  handle('project:showInFolder', (_event: Electron.IpcMainInvokeEvent, dir: string) => {
+    shell.showItemInFolder(dir);
+  });
+
+  handle('project:rename', (_event: Electron.IpcMainInvokeEvent, dir: string, name: string) => service.renameProject(dir, name));
 
   /**
    * 删除项目（确认后永久操作）：校验 + 关闭（若打开中）→ 移到系统回收站
@@ -137,6 +144,23 @@ export function registerIpcHandlers(service: AppService): void {
   handle('output:formats', () => service.listFormats());
   handle('output:list', (_event: Electron.IpcMainInvokeEvent, sceneId: string) => service.listOutputs(sceneId));
   handle('output:read', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string) => service.workspace.outputs.read(sceneId, format));
+  handle('output:save', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string, content: string) => service.saveOutput(sceneId, format, content));
+  handle('output:versions', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string) => service.listOutputVersions(sceneId, format));
+  handle('output:readVersion', (_event: Electron.IpcMainInvokeEvent, sceneId: string, format: string, snapshotId: string) => service.readOutputVersion(sceneId, format, snapshotId));
+  handle('output:export', async (event: Electron.IpcMainInvokeEvent, format: string, options: { includeTitles: boolean }) => {
+    const { content, missing } = service.exportBook(format, options);
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showSaveDialog(win!, {
+      defaultPath: `${service.workspace.project.getMeta().name}-${format}.md`,
+      filters: [
+        { name: 'Markdown', extensions: ['md'] },
+        { name: '纯文本', extensions: ['txt'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { saved: false, canceled: true, missing };
+    fs.writeFileSync(result.filePath, content, 'utf-8');
+    return { saved: true, path: result.filePath, missing };
+  });
 
   // ------------------------------------------------------------ 对话
 
@@ -155,6 +179,10 @@ export function registerIpcHandlers(service: AppService): void {
 
   handle('context:inspect', () => service.inspectContext());
   handle('context:recompress', async (_event: Electron.IpcMainInvokeEvent, focus?: string) => service.recompressContext(focus));
+
+  // ------------------------------------------------------------ 全局搜索（§6.9）
+
+  handle('search:global', (_event: Electron.IpcMainInvokeEvent, query: string) => service.globalSearch(query));
 
   // ------------------------------------------------------------ 版本历史（§5.5）
 

@@ -759,6 +759,21 @@ function OrganizeResultCard(): React.ReactElement | null {
   if (!lastOrganize) return null;
   const answer = lastOrganize.finalAnswer;
   const preview = answer.length > 2000 ? `${answer.slice(0, 2000)}…` : answer;
+  if (lastOrganize.failed) {
+    // P1 修复：失败/取消的整理——展示错误 + 部分修改详情 + 回滚入口
+    return (
+      <div className="organize-result-card organize-result-failed">
+        <div className="organize-result-head">
+          <span className="badge badge-error">整理未完成</span>
+          <span className="muted small">任务失败/取消前可能已写入部分内容，可查看变更详情并回滚</span>
+          <span className="spacer" />
+          <button className="tiny-btn" onClick={() => store.dismissOrganize()} title="收起（快照与调用详情仍保留）">收起</button>
+        </div>
+        {lastOrganize.error && <p className="organize-result-error">{lastOrganize.error}</p>}
+        <OrganizeChangesExpand runId={lastOrganize.runId} />
+      </div>
+    );
+  }
   return (
     <div className="organize-result-card">
       <div className="organize-result-head">

@@ -25,9 +25,9 @@ function makeProjectState(): ProjectState {
     name: '测试项目',
     outline: null,
     nodes: [
-      { id: 'overview', type: 'overview', title: '总纲', parentId: null, depth: 0, hasDraft: false, hasOfficial: false, outputFormats: [] },
-      { id: 'v1', type: 'volume', title: '第一卷', parentId: 'overview', depth: 1, hasDraft: true, hasOfficial: false, aiCreated: true, outputFormats: [] },
-      { id: 's1', type: 'scene', title: '第一场', parentId: 'v1', depth: 2, hasDraft: true, hasOfficial: false, outputFormats: [] },
+      { id: 'overview', type: 'overview', title: '总纲', parentId: null, depth: 0, hasDraft: false, hasOfficial: false, outputFormats: [], outputStale: [] },
+      { id: 'v1', type: 'volume', title: '第一卷', parentId: 'overview', depth: 1, hasDraft: true, hasOfficial: false, aiCreated: true, outputFormats: [], outputStale: [] },
+      { id: 's1', type: 'scene', title: '第一场', parentId: 'v1', depth: 2, hasDraft: true, hasOfficial: false, outputFormats: [], outputStale: [] },
     ],
     assets: [],
     attachments: [],
@@ -56,6 +56,8 @@ function makeApi(): RendererApi {
       open: vi.fn(async () => project),
       pickFolder: vi.fn(async () => null),
       delete: vi.fn(async () => {}),
+      showInFolder: vi.fn(async () => {}),
+      rename: vi.fn(async () => {}),
     },
     state: { get: vi.fn(async () => project) },
     outline: {
@@ -89,6 +91,10 @@ function makeApi(): RendererApi {
       formats: vi.fn(async () => ['novel', 'script']),
       list: vi.fn(async () => []),
       read: vi.fn(async () => '正文内容'),
+      save: vi.fn(async () => project),
+      versions: vi.fn(async () => []),
+      readVersion: vi.fn(async () => ''),
+      export: vi.fn(async () => ({ saved: false, canceled: true, missing: [] })),
       applyRevise: vi.fn(async () => project),
       undoRevise: vi.fn(async () => project),
     },
@@ -106,6 +112,9 @@ function makeApi(): RendererApi {
     context: {
       inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 30000, estimatedTokens: 50, compressed: false, keptRawCount: 2, blocked: false })),
       recompress: vi.fn(async () => project),
+    },
+    search: {
+      global: vi.fn(async (_query: string) => []),
     },
     nodeVersion: {
       list: vi.fn(async () => []),
@@ -637,5 +646,57 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(screen.queryByText('话题 1')).toBeNull();
+  });
+
+  it('全局搜索（§6.9）：Ctrl+K 打开 → 输入 → 结果分组 → 点击跳转节点', async () => {
+    const project = makeProjectState();
+    const searchGlobal = vi.fn(async (_q: string) => [
+      { kind: 'node', id: 's1', title: '第一场', excerpt: '陈默在码头…' },
+      { kind: 'output', id: 's1', title: '第一场（novel）', excerpt: '码头夜色…', meta: 'novel' },
+    ] as never);
+    setApiForTest({ ...makeApi(), search: { global: searchGlobal } });
+    await openProject();
+
+    // Ctrl+K 打开搜索弹窗
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const input = screen.getByTestId('global-search-input');
+    expect(input).toBeTruthy();
+
+    // 输入查询 → 防抖 300ms 后出现分组结果
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '码头' } });
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(searchGlobal).toHaveBeenCalledWith('码头');
+    expect(screen.getByText('大纲（1）')).toBeTruthy();
+    expect(screen.getByText('正文（1）')).toBeTruthy();
+
+    // 点击节点结果 → 跳转讨论模块并选中
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('search-result-node')[0]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(store.getState().module).toBe('discussion');
+    expect(store.getState().selected).toEqual({ kind: 'node', id: 's1' });
+    expect(screen.queryByTestId('global-search-input')).toBeNull(); // 弹窗关闭
+  });
+
+  it('项目菜单（§6.10）：项目名可点开菜单 → 返回项目列表', async () => {
+    await openProject();
+    await act(async () => {
+      fireEvent.click(screen.getByText('测试项目 ▾'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('返回项目列表')).toBeTruthy();
+    expect(screen.getByText('在资源管理器中显示')).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByText('返回项目列表'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 回到项目选择屏
+    expect(screen.getByPlaceholderText('项目名称')).toBeTruthy();
   });
 });

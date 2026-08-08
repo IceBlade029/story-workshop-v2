@@ -6,7 +6,8 @@
  */
 import { useSyncExternalStore } from 'react';
 import { getApi } from './api';
-import type { ProjectState, RunStreamEvent, NodeContent, OutputInfo, ContextInspection, NodeVersion, FileDiff, RunSummaryEntry } from '../shared/ipc-types';
+import { confirmDiscardDialog } from './components/ui/dialog';
+import type { ProjectState, RunStreamEvent, NodeContent, OutputInfo, ContextInspection, NodeVersion, FileDiff, RunSummaryEntry, OutputVersion, ExportBookResult, GlobalSearchResult } from '../shared/ipc-types';
 import type { AppSettings } from '../shared/llm-types';
 import type { ChatMessage, ToolCallTrace, VisibleView } from '../shared/types';
 
@@ -83,6 +84,8 @@ export interface AppState {
   pendingAttachments: PendingAttachment[];
   activeRun: ActiveRun | null;
   lastRunId: string | null;
+  /** 全局搜索「正文/可见视图」跳转的待应用格式（§6.9：WritingModule 消费后清除） */
+  pendingWritingFormat: string | null;
   /** 最近一次写作任务（detail_fill / revise）的内部 runId（沙箱隔离后写作任务
    * 在讨论中零痕迹；正文模块工具栏「ⓘ 调用详情」入口用，ux-review §4.7）。
    */
@@ -90,8 +93,10 @@ export interface AppState {
   /**
    * 最近一次整理任务的瞬态结果（Part 4：organize 沙箱化后不写对话日志，
    * 结果以子栏卡片展示；重启后消失，历史由调用详情记录兜底）。
+   * P1 修复：失败/取消的整理同样进卡片（failed），提供「部分写入详情 + 回滚」
+   * 恢复入口——快照与变更摘要已为失败 run 落盘。
    */
-  lastOrganize: { runId: string; finalAnswer: string } | null;
+  lastOrganize: { runId: string; finalAnswer: string; failed?: boolean; error?: string } | null;
   toast: { message: string; kind: ToastKind } | null;
   /** 大纲树展开状态（§3.1，切 tab 不丢） */
   expandedIds: Set<string>;
@@ -118,6 +123,7 @@ const initial: AppState = {
   pendingAttachments: [],
   activeRun: null,
   lastRunId: null,
+  pendingWritingFormat: null,
   lastWritingRunId: null,
   lastOrganize: null,
   toast: null,
@@ -220,6 +226,58 @@ function withState<T>(next: (s: AppState) => AppState): void {
   for (const l of listeners) l();
 }
 
+// ---------------------------------------------------------------------------
+// 未保存保护（ux-review §6.8）：编辑器脏状态守卫注册表
+// 每个编辑器（正文/草稿/设定/可见视图）mount 时注册、unmount 时注销；
+// 导航（切节点/场景/格式/跳转）前检查受影响编辑器的脏状态，弹三选一确认。
+// ---------------------------------------------------------------------------
+
+export interface EditorGuard {
+  /** 唯一键（如 draft:<nodeId> / output:<sceneId>:<format> / asset:<id> / view:<sceneId>） */
+  key: string;
+  /** 当前是否有未保存修改（用 ref 读取，避免闭包陈旧） */
+  isDirty: () => boolean;
+  /** 保存当前内容；返回是否成功（失败则不继续导航） */
+  save: () => Promise<boolean>;
+}
+
+const dirtyEditors = new Map<string, EditorGuard>();
+
+export function registerEditorGuard(guard: EditorGuard): () => void {
+  dirtyEditors.set(guard.key, guard);
+  return () => {
+    if (dirtyEditors.get(guard.key) === guard) dirtyEditors.delete(guard.key);
+  };
+}
+
+function hasAnyDirty(): boolean {
+  for (const g of dirtyEditors.values()) if (g.isDirty()) return true;
+  return false;
+}
+
+/**
+ * 离开守卫：本次切换会使 match 命中的编辑器失去内容（reload/卸载）。
+ * 对每个受影响且脏的编辑器依次弹三选一确认；任一「取消」或「保存失败」→ false。
+ */
+async function guardBeforeLeave(match: (key: string) => boolean): Promise<boolean> {
+  for (const g of dirtyEditors.values()) {
+    if (!match(g.key) || !g.isDirty()) continue;
+    const choice = await confirmDiscardDialog({
+      title: '有未保存的修改',
+      message: '切换后当前编辑内容将丢失。',
+      confirmText: '保存并继续',
+      discardText: '放弃修改',
+      cancelText: '取消',
+    });
+    if (choice === 'cancel') return false;
+    if (choice === 'save') {
+      const ok = await g.save();
+      if (!ok) return false; // 保存失败：不导航，用户保留本地内容重试
+    }
+  }
+  return true;
+}
+
 export const store = {
   getState(): AppState {
     return state;
@@ -263,6 +321,34 @@ export const store = {
     if (dir) await this.openProject(dir);
   },
 
+  /** 返回项目列表（§6.10：TopBar 项目菜单）。切换前未保存保护由调用方确认。 */
+  async backToProjects(): Promise<void> {
+    setState({
+      project: null,
+      activeRun: null,
+      lastRunId: null,
+      lastWritingRunId: null,
+      lastOrganize: null,
+      pendingAttachments: [],
+      inputText: '',
+      selected: null,
+      workspaceMode: null,
+      viewHistory: [],
+      writingSceneId: null,
+    });
+    await this.loadProjects();
+  },
+
+  /** 重命名当前项目（仅更新 project.json 名称）。 */
+  async renameProject(name: string): Promise<void> {
+    const dir = state.project?.dir;
+    if (!dir) throw new Error('NO_PROJECT_OPEN');
+    const api = getApi();
+    await api.project.rename(dir, name);
+    const project = await api.state.get();
+    setState({ project });
+  },
+
   /**
    * 删除项目（确认后移到系统回收站）：若删除的是当前打开项目 → 自动关闭并
    * 回到项目列表；随后刷新列表。
@@ -303,8 +389,24 @@ export const store = {
   },
 
   /** 正文模块内选择场景（§5.1 树形导航；与讨论模块选中节点互相独立）。 */
-  setWritingScene(sceneId: string): void {
+  async setWritingScene(sceneId: string): Promise<void> {
+    const current = state.writingSceneId;
+    if (current && current !== sceneId) {
+      const ok = await guardBeforeLeave((key) => key.startsWith(`output:${current}:`) || key.startsWith(`view:${current}`));
+      if (!ok) return;
+    }
     setState({ writingSceneId: sceneId });
+  },
+
+  /** 全局搜索跳转（§6.9）：切到正文模块并选中场景；format 非空则待应用。 */
+  setWritingTarget(sceneId: string, format: string): void {
+    void this.setWritingScene(sceneId);
+    if (format) withState((s) => ({ ...s, pendingWritingFormat: format }));
+  },
+
+  /** 消费完毕清除待应用格式（§6.9：WritingModule 应用后调用）。 */
+  clearPendingWritingFormat(): void {
+    if (state.pendingWritingFormat) setState({ pendingWritingFormat: null });
   },
 
   /** 大纲树展开状态（§3.1）。 */
@@ -322,11 +424,21 @@ export const store = {
   },
 
   /** 选择大纲节点/设定（ux-review §4.6：左栏选择直接替换，不压历史栈）。 */
-  selectNode(nodeId: string): void {
+  async selectNode(nodeId: string): Promise<void> {
+    const current = state.selected;
+    if (current?.kind === 'node' && current.id !== nodeId) {
+      const ok = await guardBeforeLeave((key) => key.startsWith(`draft:${current.id}`));
+      if (!ok) return;
+    }
     setState({ selected: { kind: 'node', id: nodeId }, workspaceMode: 'node' });
   },
 
-  selectAsset(assetId: string): void {
+  async selectAsset(assetId: string): Promise<void> {
+    const current = state.selected;
+    if (current?.kind === 'asset' && current.id !== assetId) {
+      const ok = await guardBeforeLeave((key) => key === `asset:${current.id}`);
+      if (!ok) return;
+    }
     setState({ selected: { kind: 'asset', id: assetId }, workspaceMode: 'asset' });
   },
 
@@ -334,9 +446,14 @@ export const store = {
    * 跳转类操作（ux-review §4.6）：对话流链接 / 正文模块「打开」→ 压入
    * 历史栈（回到跳转前正在查看的对象），再选中目标。
    */
-  jumpTo(kind: 'node' | 'asset', id: string): void {
+  async jumpTo(kind: 'node' | 'asset', id: string): Promise<void> {
+    const current = state.selected;
+    if (current && current.id !== id) {
+      const ok = await guardBeforeLeave((key) =>
+        current.kind === 'node' ? key.startsWith(`draft:${current.id}`) : key === `asset:${current.id}`);
+      if (!ok) return;
+    }
     withState((s) => {
-      const current = s.selected;
       const next: Array<{ kind: 'node' | 'asset'; id: string }> = current ? [...s.viewHistory, current] : s.viewHistory;
       return {
         ...s,
@@ -348,7 +465,13 @@ export const store = {
   },
 
   /** 回退：跳到跳转前正在查看的对象（右栏「←」，§4.6）。 */
-  viewBack(): void {
+  async viewBack(): Promise<void> {
+    const current = state.selected;
+    if (current) {
+      const ok = await guardBeforeLeave((key) =>
+        current.kind === 'node' ? key.startsWith(`draft:${current.id}`) : key === `asset:${current.id}`);
+      if (!ok) return;
+    }
     withState((s) => {
       if (s.viewHistory.length === 0) return s;
       const prev = s.viewHistory[s.viewHistory.length - 1];
@@ -666,11 +789,25 @@ export const store = {
           void this.finishRun(run.runId, event.result.error ?? null, event.result.finalAnswer);
         }
         // Part 4：organize 沙箱化——成功后结果进瞬态卡片（不写对话日志）
-        if (run.kind === 'organize' && !event.result.error && !event.result.cancelled) {
-          withState((s) => ({
-            ...s,
-            lastOrganize: { runId: event.result.runId, finalAnswer: event.result.finalAnswer ?? '' },
-          }));
+        // P1 修复：失败/取消的整理同样进卡片（failed + 错误原因），
+        // 卡片内可查看「部分修改详情」并回滚（快照已为失败 run 落盘）。
+        if (run.kind === 'organize') {
+          if (!event.result.error && !event.result.cancelled) {
+            withState((s) => ({
+              ...s,
+              lastOrganize: { runId: event.result.runId, finalAnswer: event.result.finalAnswer ?? '' },
+            }));
+          } else if (event.result.runId) {
+            withState((s) => ({
+              ...s,
+              lastOrganize: {
+                runId: event.result.runId,
+                finalAnswer: event.result.finalAnswer ?? '',
+                failed: true,
+                error: event.result.error ?? (event.result.cancelled ? '已取消（可能已产生部分写入）' : '未知错误'),
+              },
+            }));
+          }
         }
         // 写作任务（沙箱隔离）：记录内部 runId，供正文模块「ⓘ 调用详情」入口（§4.7）
         if ((run.kind === 'detail_fill' || run.kind === 'revise') && event.result.runId) {
@@ -872,6 +1009,49 @@ export const store = {
   async loadFormats(): Promise<string[]> {
     const api = getApi();
     return api.output.formats();
+  },
+
+  /** 手工保存正文（写入前快照，进版本历史；§6.5 修订）。 */
+  async saveOutput(sceneId: string, format: string, content: string): Promise<void> {
+    const api = getApi();
+    const project = await api.output.save(sceneId, format, content);
+    setState({ project });
+  },
+
+  /** 正文版本历史（生成/改写/手工保存各成一版）。 */
+  async loadOutputVersions(sceneId: string, format: string): Promise<OutputVersion[]> {
+    const api = getApi();
+    return api.output.versions(sceneId, format);
+  },
+
+  /** 读取某版本正文内容。 */
+  async readOutputVersion(sceneId: string, format: string, snapshotId: string): Promise<string> {
+    const api = getApi();
+    return api.output.readVersion(sceneId, format, snapshotId);
+  },
+
+  /** 整书导出（保存对话框选路径）；缺失场景不阻断。 */
+  async exportBook(format: string, options: { includeTitles: boolean }): Promise<ExportBookResult> {
+    const api = getApi();
+    return api.output.export(format, options);
+  },
+
+  /** 全局搜索（§6.9）。 */
+  async globalSearch(query: string): Promise<GlobalSearchResult[]> {
+    const api = getApi();
+    return api.search.global(query);
+  },
+
+  // ------------------------------------------------------------ 未保存保护（ux-review §6.8）
+
+  /** 组件自定义切换前的统一守卫（如正文格式切换）。 */
+  async guardLeave(match: (key: string) => boolean): Promise<boolean> {
+    return guardBeforeLeave(match);
+  },
+
+  /** 是否有任意编辑器未保存（关窗 beforeunload 用）。 */
+  hasDirtyEditors(): boolean {
+    return hasAnyDirty();
   },
 
   // ------------------------------------------------------------ 摘要/回滚

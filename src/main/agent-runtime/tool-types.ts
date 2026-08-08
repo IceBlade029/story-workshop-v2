@@ -45,6 +45,14 @@ export interface ToolContext {
    * 附件读取工具据此硬性过滤：范围外的附件默认不可见；跨会话读取须作者显式要求。
    */
   attachmentScope?: ReadonlySet<string>;
+  /**
+   * 资源能力边界（P1 修复）：当前 run 被允许访问的场景与格式
+   * （detail_fill / revise 由 app-service 注入；chat / organize 缺省不限制）。
+   * 正文相关工具（read_visible_view / read_format_template / write_output /
+   * read_output）执行器层强制比对模型传入值，越界直接拒绝。
+   */
+  allowedSceneId?: string;
+  allowedFormat?: string;
 }
 
 /** 工具规格 */
