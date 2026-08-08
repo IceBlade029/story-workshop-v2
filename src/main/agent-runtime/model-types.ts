@@ -46,7 +46,7 @@ export interface ToolCall {
  */
 export type ModelTurn =
   | { type: 'tool_calls'; toolCalls: ToolCall[]; usage: Usage; reasoning?: string }
-  | { type: 'final'; answer: string; citations?: EvidenceRef[]; usage: Usage; reasoning?: string };
+  | { type: 'final'; answer: string; citations?: EvidenceRef[]; usage: Usage; reasoning?: string; truncated?: boolean };
 
 /** Input for a single model turn */
 export interface ModelTurnInput {

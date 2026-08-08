@@ -37,7 +37,7 @@ export type ChatChunk =
   | { type: 'reasoning_delta'; content: string }
   | { type: 'tool_call_delta'; index: number; id?: string; name?: string; arguments?: string }
   | { type: 'search_status'; status: 'searching' | 'completed' }
-  | { type: 'done'; finishReason: 'stop' | 'tool_calls'; usage: Usage };
+  | { type: 'done'; finishReason: 'stop' | 'tool_calls' | 'length' | 'content_filter'; usage: Usage };
 
 /**
  * ChatResponse — non-streaming response following OpenAI/DeepSeek format.
@@ -365,6 +365,7 @@ export class NativeModelAdapter implements ModelAdapter {
     const usage = validateUsage(response.usage);
     const { message, finish_reason } = choice;
     const reasoning = message.reasoning_content || undefined;
+    const truncated = finish_reason === 'length';
 
     // Check for tool_calls in the response
     if (message.tool_calls) {
@@ -387,6 +388,8 @@ export class NativeModelAdapter implements ModelAdapter {
       answer: message.content,
       usage,
       ...(reasoning ? { reasoning } : {}),
+      // 被 max_tokens 截断：UI 显示「已截断」徽标（调大设置可解决）
+      ...(truncated ? { truncated: true } : {}),
     };
   }
 
@@ -406,7 +409,8 @@ export class NativeModelAdapter implements ModelAdapter {
   private handleJsonResponse(response: ChatResponse): ModelTurn {
     const choice = this.validateChoice(response);
     const usage = validateUsage(response.usage);
-    const { message } = choice;
+    const { message, finish_reason } = choice;
+    const truncated = finish_reason === 'length';
 
     // Try to parse the response content as JSON
     if (message.content) {
@@ -425,6 +429,7 @@ export class NativeModelAdapter implements ModelAdapter {
               type: 'final',
               answer: parsed.answer ?? '',
               usage,
+              ...(truncated ? { truncated: true } : {}),
             };
           }
         }
@@ -442,6 +447,7 @@ export class NativeModelAdapter implements ModelAdapter {
       type: 'final',
       answer: message.content,
       usage,
+      ...(truncated ? { truncated: true } : {}),
     };
   }
 
@@ -501,6 +507,7 @@ export class NativeModelAdapter implements ModelAdapter {
     >();
     let seenDone = false;
     let finalUsage: Usage | null = null;
+    let truncated = false;
 
     for await (const chunk of iterable) {
       if (chunk.type === 'text_delta') {
@@ -534,6 +541,7 @@ export class NativeModelAdapter implements ModelAdapter {
         }
       } else if (chunk.type === 'done') {
         seenDone = true;
+        if (chunk.finishReason === 'length') truncated = true;
         if (
           !chunk.usage ||
           typeof chunk.usage.inputTokens !== 'number' ||
@@ -584,6 +592,8 @@ export class NativeModelAdapter implements ModelAdapter {
       answer: textFragments.join(''),
       usage: finalUsage,
       ...(reasoning ? { reasoning } : {}),
+      // 被 max_tokens 截断（流式 done finishReason=length）：UI 显示「已截断」徽标
+      ...(truncated ? { truncated: true } : {}),
     };
   }
 }

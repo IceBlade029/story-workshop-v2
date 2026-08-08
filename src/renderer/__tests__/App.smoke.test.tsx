@@ -42,7 +42,7 @@ function makeProjectState(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 },
   };
 }
 
@@ -459,8 +459,17 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(refresh).toHaveBeenCalledWith('m2');
-    // 运行中：按钮禁用（防并发 run）
-    expect((screen.getByText('⟳ 重新生成') as HTMLButtonElement).disabled).toBe(true);
+    // 就地替换（bug 修复）：旧回答立即被流式卡片替换，不再「先新增卡片、完成后才替换」
+    expect(screen.queryByText('明白。')).toBeNull();
+    expect(screen.getByText('重新生成中…')).toBeTruthy();
+    expect(screen.queryByText('⟳ 重新生成')).toBeNull();
+    // 流式增量直接在原位置渲染
+    await act(async () => {
+      store.applyRunEvent({ runId: 'run_rf', type: 'chunk', text: '回答 v2' });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('回答 v2')).toBeTruthy();
+    expect(screen.queryByText('明白。')).toBeNull();
 
     // 完成 → 状态刷新为新版本 → 头部出现 ◀ 2/2 ▶ 版本导航，重新生成仍在
     await act(async () => {
@@ -688,6 +697,87 @@ describe('主题系统 — 切换持久化（data-theme + localStorage 镜像 + 
     expect(api.settings.update).toHaveBeenCalledWith({ theme: 'nebula' });
     expect(document.documentElement.dataset.theme).toBe('nebula');
     expect(screen.getAllByText('使用中').length).toBeGreaterThan(0);
+  });
+});
+
+describe('输出系统 — 回答样式与最大输出长度', () => {
+  it('设置弹窗「输出」区：回答样式与最大输出长度可选，修改调用 settings.update', async () => {
+    const api = makeApi();
+    api.settings.update = vi.fn(async () => makeProjectState());
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('设置（弹窗）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('输出')).toBeTruthy();
+    // 默认 DeepSeek 风格；切换到 Opencode 风格
+    const styleSelect = screen.getByDisplayValue('DeepSeek 风格（默认）') as HTMLSelectElement;
+    fireEvent.change(styleSelect, { target: { value: 'opencode' } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(api.settings.update).toHaveBeenCalledWith({ outputStyle: 'opencode' });
+    // 最大输出长度 → 32768
+    await act(async () => {
+      fireEvent.change(screen.getByDisplayValue('16,384 tokens'), { target: { value: '32768' } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(api.settings.update).toHaveBeenCalledWith({ maxOutputTokens: 32768 });
+  });
+
+  it('回答渲染：默认 DeepSeek 风格类；切换纯文本后 AI 消息为 <pre> 原样', async () => {
+    const api = makeApi();
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 默认 outputStyle=deepseek → AI 消息带 md-style-deepseek
+    expect(document.querySelector('.md.md-style-deepseek')).toBeTruthy();
+
+    // 切换纯文本 → 重新渲染为 <pre>
+    const plain = makeProjectState();
+    plain.settings = { ...plain.settings, outputStyle: 'plain' };
+    api.state.get = vi.fn(async () => plain);
+    api.settings.update = vi.fn(async () => plain);
+    await act(async () => {
+      await store.updateSettings({ outputStyle: 'plain' });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.querySelector('.md')).toBeNull();
+    expect(document.querySelector('pre.msg-content')).toBeTruthy();
+  });
+
+  it('截断徽标：AI 消息 truncated=true → 显示「已截断」', async () => {
+    const api = makeApi();
+    const p = makeProjectState();
+    p.messages = [
+      msg('m1', 'user', '评价这段设定'),
+      msg('m2', 'ai', '（长篇评价……被截断）', 'm1'),
+    ];
+    (p.messages[1] as { truncated?: boolean }).truncated = true;
+    p.activeMessageId = 'm2';
+    p.sessions = [{ id: 'sess1', title: '话题 1', tailMessageId: 'm2', rootMessageId: 'm1', archivedAt: 't' }];
+    api.project.create = vi.fn(async () => p);
+    api.project.open = vi.fn(async () => p);
+    api.state.get = vi.fn(async () => p);
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText(/已截断/)).toBeTruthy();
   });
 });
 

@@ -33,7 +33,7 @@ function makeProject(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 },
   };
 }
 

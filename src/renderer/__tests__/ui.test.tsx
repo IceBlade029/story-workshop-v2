@@ -99,6 +99,35 @@ describe('MarkdownView — 暂不明示标记（§6.1）', () => {
     expect(screen.getByText('加粗')).toBeTruthy();
     expect(document.querySelector('.marker-highlight')).toBeTruthy();
   });
+
+  it('输出样式：plain → 原样文本 <pre>；其余 → md md-style-<style> 类', () => {
+    const { unmount } = render(<MarkdownView text={'**重点**\n第二行'} style="plain" />);
+    const pre = document.querySelector('pre.msg-content');
+    expect(pre).toBeTruthy();
+    expect(pre?.textContent).toBe('**重点**\n第二行');
+    expect(document.querySelector('.md')).toBeNull();
+    unmount();
+
+    render(<MarkdownView text={'# 标题'} style="deepseek" />);
+    const md = document.querySelector('.md.md-style-deepseek');
+    expect(md).toBeTruthy();
+    expect(document.querySelector('pre.msg-content')).toBeNull();
+  });
+
+  it('代码块经 highlight.js 语法高亮（js 语言 → hljs span，未知语言不崩）', () => {
+    const { unmount } = render(<MarkdownView text={'```js\nconst x = 1;\n```'} style="opencode" />);
+    const code = document.querySelector('pre code.hljs');
+    expect(code).toBeTruthy();
+    expect(code?.className).toContain('language-js');
+    expect(code?.querySelector('.hljs-keyword')).toBeTruthy();
+    expect(code?.textContent).toContain('const x = 1;');
+    unmount();
+
+    render(<MarkdownView text={'```nosuchlang\nplain\n```'} />);
+    const code2 = document.querySelector('pre code');
+    expect(code2).toBeTruthy();
+    expect(code2?.textContent).toContain('plain');
+  });
 });
 
 describe('DiffView — 文件级 diff（§5.4）', () => {

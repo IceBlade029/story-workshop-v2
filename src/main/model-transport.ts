@@ -165,6 +165,7 @@ export class DeepSeekTransport implements ModelTransport {
     let ended = false;
     let streamError: Error | null = null;
     let finalUsage: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 };
+    let doneReason: Extract<ChatChunk, { type: 'done' }>['finishReason'] = 'stop';
 
     const push = (chunk: ChatChunk): void => {
       queue.push(chunk);
@@ -177,6 +178,14 @@ export class DeepSeekTransport implements ModelTransport {
           inputTokens: chunk.usage.promptTokens,
           outputTokens: chunk.usage.completionTokens,
         };
+        if (
+          chunk.finishReason === 'tool_calls' ||
+          chunk.finishReason === 'stop' ||
+          chunk.finishReason === 'length' ||
+          chunk.finishReason === 'content_filter'
+        ) {
+          doneReason = chunk.finishReason;
+        }
         return;
       }
       if (chunk.reasoningContent) {
@@ -221,7 +230,7 @@ export class DeepSeekTransport implements ModelTransport {
       await new Promise<void>((resolve) => waiters.push(resolve));
     }
     if (streamError) throw streamError;
-    yield { type: 'done', finishReason: 'stop', usage: finalUsage };
+    yield { type: 'done', finishReason: doneReason, usage: finalUsage };
   }
 
   // -------------------------------------------------------------------------
@@ -242,6 +251,8 @@ export class DeepSeekTransport implements ModelTransport {
     // 搜索轮（web_search_call 且无函数调用）：
     // - 无文本 → 虚拟化为伪 tool_call，run-loop 走「占位执行 + 原样回传」闭环
     // - 有文本 → 服务端已自动完成搜索+回答，直接作为 final
+    // 思维链必须保留：thinking 模式下搜索轮同样产生 reasoning，丢弃则下一轮回传
+    // 缺失 → DeepSeek 400（reasoning_text must be passed back）
     const hasFunctionCalls = res.toolCalls !== undefined && res.toolCalls.length > 0;
     if (!hasFunctionCalls && res.webSearchCalls && res.webSearchCalls.length > 0 && !res.content) {
       return {
@@ -251,6 +262,7 @@ export class DeepSeekTransport implements ModelTransport {
             message: {
               role: 'assistant',
               content: null,
+              reasoning_content: res.reasoningContent ?? null,
               tool_calls: toVirtualWebSearchCalls(res.webSearchCalls),
             },
             finish_reason: 'tool_calls',
@@ -296,7 +308,7 @@ export class DeepSeekTransport implements ModelTransport {
     let ended = false;
     let streamError: Error | null = null;
     let finalUsage: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 };
-    let doneReason: 'stop' | 'tool_calls' = 'stop';
+    let doneReason: Extract<ChatChunk, { type: 'done' }>['finishReason'] = 'stop';
     let sawFunctionToolCall = false;
 
     const push = (chunk: ChatChunk): void => {
@@ -311,7 +323,7 @@ export class DeepSeekTransport implements ModelTransport {
           outputTokens: chunk.usage.completionTokens,
         };
         if (chunk.finishReason === 'tool_calls' || chunk.finishReason === 'stop' || chunk.finishReason === 'length' || chunk.finishReason === 'content_filter') {
-          doneReason = chunk.finishReason as 'stop' | 'tool_calls';
+          doneReason = chunk.finishReason;
         }
         // 服务端搜索轮（finishReason=tool_calls 且无函数调用）：把 web_search_call
         // 虚拟化为伪 tool_call，让 run-loop 走「占位执行 + 原样回传」闭环。

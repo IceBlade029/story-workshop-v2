@@ -85,6 +85,11 @@ export interface AppState {
   pendingAttachments: PendingAttachment[];
   activeRun: ActiveRun | null;
   lastRunId: string | null;
+  /**
+   * 正在被「重新生成」的消息 id（DeepSeek 式就地替换）：刷新 run 进行中时
+   * 该消息立即被流式卡片替换，完成后新版本接管（旧版进 ◀ ▶ 版本导航）。
+   */
+  refreshingMessageId: string | null;
   /** 全局搜索「正文/可见视图」跳转的待应用格式（§6.9：WritingModule 消费后清除） */
   pendingWritingFormat: string | null;
   /** 最近一次写作任务（detail_fill / revise）的内部 runId（沙箱隔离后写作任务
@@ -130,6 +135,7 @@ const initial: AppState = {
   pendingAttachments: [],
   activeRun: null,
   lastRunId: null,
+  refreshingMessageId: null,
   pendingWritingFormat: null,
   lastWritingRunId: null,
   lastOrganize: null,
@@ -245,11 +251,11 @@ function scheduleRunFallback(runId: string): void {
         if (run.kind === 'chat' || run.kind === 'organize') {
           const completed = project.messages.some((m) => m.role === 'ai' && m.runId === runId);
           if (completed) {
-            withState((s) => ({ ...s, project, activeRun: null }));
+            withState((s) => ({ ...s, project, activeRun: null, refreshingMessageId: null }));
             store.showToast('运行已完成，结果已刷新', 'info');
           }
         } else {
-          withState((s) => ({ ...s, project, activeRun: null }));
+          withState((s) => ({ ...s, project, activeRun: null, refreshingMessageId: null }));
           store.showToast('正文任务已完成，结果已刷新', 'info');
         }
       } catch {
@@ -365,6 +371,7 @@ export const store = {
     setState({
       project: null,
       activeRun: null,
+      refreshingMessageId: null,
       lastRunId: null,
       lastWritingRunId: null,
       lastOrganize: null,
@@ -400,6 +407,7 @@ export const store = {
       setState({
         project: null,
         activeRun: null,
+        refreshingMessageId: null,
         lastRunId: null,
         lastWritingRunId: null,
         lastOrganize: null,
@@ -617,17 +625,19 @@ export const store = {
     const retry: RunRequestParams = kind === 'chat'
       ? { kind: 'chat', parentMessageId: req.parentMessageId }
       : { kind: 'organize', scope: req.scope ?? { type: 'unorganized' }, note: req.note };
-    withState((s) => ({ ...s, activeRun: { runId, kind, chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry } }));
+    withState((s) => ({ ...s, refreshingMessageId: null, activeRun: { runId, kind, chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry } }));
     scheduleRunFallback(runId);
   },
 
-  /** 刷新最后一条 AI 消息（重新生成，生成新版本 ◀ ▶ 可切换）。 */
+  /** 刷新最后一条 AI 消息（重新生成，生成新版本 ◀ ▶ 可切换）。
+   * 旧回答立即被流式卡片就地替换（refreshingMessageId），完成后新版本接管。 */
   async refreshMessage(messageId: string): Promise<void> {
     const api = getApi();
     if (state.activeRun?.status === 'running') throw new Error('RUN_IN_PROGRESS: 运行中不能重新生成，请先等待完成或取消');
     const { runId } = await api.run.refresh(messageId);
     withState((s) => ({
       ...s,
+      refreshingMessageId: messageId,
       activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: { kind: 'refresh', messageId } },
     }));
     scheduleRunFallback(runId);
@@ -700,7 +710,7 @@ export const store = {
       }
       case 'refresh': {
         const { runId } = await getApi().run.refresh(params.messageId);
-        withState((s) => ({ ...s, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
+        withState((s) => ({ ...s, refreshingMessageId: params.messageId, activeRun: { runId, kind: 'chat', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
       }
@@ -898,6 +908,7 @@ export const store = {
     const api = getApi();
     withState((s) => ({
       ...s,
+      refreshingMessageId: null,
       activeRun: { ...s.activeRun!, status: isError ? 'error' : 'done', error: error ?? undefined, finalAnswer },
       lastRunId: runId,
     }));

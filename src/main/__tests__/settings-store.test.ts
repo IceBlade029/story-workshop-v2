@@ -29,28 +29,30 @@ afterAll(() => {
 });
 
 describe('settings-store', () => {
-  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开 · 主题跟随系统）', () => {
+  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开 · 主题跟随系统 · DeepSeek 输出风格 · 16384 输出上限）', () => {
     const s = getSettings();
-    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' });
+    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
   });
 
   it('保存并读回；非法值回退默认', () => {
     saveSettings({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max' });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true, theme: 'system' });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
 
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe', theme: 'rainbow' }), 'utf-8');
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe', theme: 'rainbow', outputStyle: 'fancy', maxOutputTokens: 99999 }), 'utf-8');
     const s = getSettings();
     expect(s.model).toBe('deepseek-v4-flash');
     expect(s.thinking).toBe(true);
     expect(s.reasoningEffort).toBe('high');
     expect(s.notifications).toBe(true);
     expect(s.theme).toBe('system');
+    expect(s.outputStyle).toBe('deepseek');
+    expect(s.maxOutputTokens).toBe(16384);
   });
 
   it('部分更新保留其余字段', () => {
     saveSettings({ model: 'deepseek-v4-pro' });
     saveSettings({ thinking: false });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true, theme: 'system' });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
   });
 
   it('主题：保存并读回；非法值写不进去', () => {
@@ -60,6 +62,17 @@ describe('settings-store', () => {
     const next = saveSettings({ theme: 'rainbow' as never });
     expect(next.theme).toBe('nebula');
     expect(getSettings().theme).toBe('nebula');
+  });
+
+  it('输出样式与最大输出长度：保存并读回；非法值保留当前值', () => {
+    saveSettings({ outputStyle: 'opencode', maxOutputTokens: 32768 });
+    expect(getSettings().outputStyle).toBe('opencode');
+    expect(getSettings().maxOutputTokens).toBe(32768);
+    // 非法值 → 不入库
+    const next = saveSettings({ outputStyle: 'fancy' as never, maxOutputTokens: 12345 as never });
+    expect(next.outputStyle).toBe('opencode');
+    expect(next.maxOutputTokens).toBe(32768);
+    expect(getSettings().outputStyle).toBe('opencode');
   });
 
   it('损坏文件 → 回退默认', () => {

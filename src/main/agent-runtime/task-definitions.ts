@@ -71,6 +71,19 @@ export const NO_EMOJI_RULE = [
 ].join('\n');
 
 /**
+ * 回答排版规则：模型输出必须使用 Markdown 组织（聊天界面按 Markdown 渲染，
+ * 有标题/加粗/列表/代码高亮）。显式澄清上一条「不用图形符号替代」仅指
+ * emoji/语气符号，不禁止 Markdown 标记——否则模型会输出纯段落文字，
+ * 界面渲染出来就是「普通文字」。
+ */
+export const MARKDOWN_FORMAT_RULE = [
+  '回答排版：用 Markdown 组织回答，让重点一目了然——',
+  '需要层次时用 ## / ### 小标题，关键点用 **加粗**，并列项用 - 列表，',
+  '引用原文用 >，示例/格式用 ``` 代码块；长回答务必分段（空行分隔）。',
+  '注意：「不用图形符号替代」仅指 emoji 与语气符号；Markdown 标记（加粗/标题/列表/代码块）是推荐使用的排版方式，不算图形符号。',
+].join('\n');
+
+/**
  * 联网搜索规则（web_search，仅 chat）：讨论中可以查实时信息。
  * 搜索由服务端自动执行，结果直接注入上下文；回答基于搜索结果并注明来源，
  * 不得把搜索结果冒充为作品设定。
@@ -94,6 +107,8 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       '作者明确要求查看其他会话或项目里的附件时，才允许用 list_all_attachments / read_any_attachment 跨会话读取；不得主动跨会话检索。',
       ATTACHMENT_READ_RULE,
       '作者有需要落实为结构的内容时，会自己点击「整理」按钮启动整理任务——那不是你的职责。',
+      '回答充分性：作者要求深入分析、详细评价或展开论述时，回答应充分展开（分点、多维度、结合材料细节），不要潦草收尾或只给结论。',
+      MARKDOWN_FORMAT_RULE,
       NO_EMOJI_RULE,
     ].join('\n'),
     whitelist: [
@@ -131,6 +146,7 @@ export const TASK_DEFINITIONS: Record<TaskKind, TaskDefinition> = {
       ATTACHMENT_READ_RULE,
       '最终回答只允许简短总结（一两段即可，禁止复述、扩展或发散材料内容）：本次整理的范围、产出清单',
       '（逐条列出新建/更新的节点与设定名称）、待定的缺口（信息不足未能落定的部分）。',
+      '总结排版：产出清单与缺口用 Markdown 列表（- 产出：xxx / - 待定缺口：xxx）逐条呈现。',
       '写作完成前不要输出最终总结；所有落盘动作必须先通过写入工具完成。',
       NO_EMOJI_RULE,
     ].join('\n'),

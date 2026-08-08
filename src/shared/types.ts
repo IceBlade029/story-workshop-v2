@@ -95,6 +95,8 @@ export interface ChatMessage {
   reasoning?: string;
   /** 思考耗时（秒，推理时计时；reasoning 非空时存在） */
   thinkingSeconds?: number;
+  /** 回答被 max_output_tokens 截断（UI 显示徽标提示可调大上限） */
+  truncated?: boolean;
   /** 引用，不存正文 */
   refs?: { attachmentIds?: string[]; nodeIds?: string[] };
 }

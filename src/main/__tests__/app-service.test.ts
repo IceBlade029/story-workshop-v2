@@ -3,10 +3,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { AppService } from '../app-service';
-import { configureSettingsDir, getSettings } from '../settings-store';
+import { configureSettingsDir, getSettings, saveSettings } from '../settings-store';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import { makeTempDir, removeDir } from './helpers/temp-project';
-import type { ModelAdapter, ModelTurnInput, ModelTurn } from '../agent-runtime/model-types';
+import type { ModelAdapter, ModelTurnInput, ModelTurn, ModelTurnOptions } from '../agent-runtime/model-types';
 import type { OrganizeScope } from '../../shared/ipc-types';
 
 // 与机器上的真实凭据库解耦
@@ -713,5 +713,26 @@ describe('app-service — 设置（全局设置与项目解耦）', () => {
     service.createProject(path.join(root, 'proj'), '测试项目');
     const result = service.updateSettings({ theme: 'sakura' });
     expect(result?.settings.theme).toBe('sakura');
+  });
+
+  it('chat run 注入全局「最大输出长度」（maxOutputTokens → runTurn options.maxTokens）', async () => {
+    saveSettings({ maxOutputTokens: 32768 });
+    class OptionsRecordingModel extends ScriptedModelAdapter {
+      readonly optionsList: Array<ModelTurnOptions | undefined> = [];
+      constructor(script: ScriptedTurn[]) { super(script); }
+      async runTurn(input: ModelTurnInput, options?: ModelTurnOptions): Promise<ModelTurn> {
+        this.optionsList.push(options);
+        return super.runTurn(input, options);
+      }
+    }
+    const model = new OptionsRecordingModel([{ type: 'final', answer: '明白。', usage: usage(5, 2) }]);
+    const service = new AppService(() => model);
+    const root = makeTempDir();
+    tempDirs.push(root);
+    service.createProject(path.join(root, 'proj'), '测试项目');
+    service.sendMessage('你好');
+    await service.run({ kind: 'chat' });
+    expect(model.optionsList.length).toBeGreaterThan(0);
+    expect(model.optionsList[0]?.maxTokens).toBe(32768);
   });
 });

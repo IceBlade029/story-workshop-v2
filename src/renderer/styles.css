@@ -927,6 +927,43 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
 .md a:hover { text-decoration: underline; }
 .md hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
 
+/* ── 输出风格：DeepSeek 风格（默认，输出系统）——
+ * 标题用主题强调色、加粗加重、引用强调色块，突出重点且干净 */
+.md-style-deepseek h1, .md-style-deepseek h2, .md-style-deepseek h3, .md-style-deepseek h4 { color: var(--accent); }
+.md-style-deepseek h1 { border-bottom-color: var(--border-strong); font-weight: 700; }
+.md-style-deepseek strong { font-weight: 700; color: var(--text); }
+.md-style-deepseek em { color: var(--text-secondary); }
+.md-style-deepseek blockquote { border-left-color: var(--accent); background: var(--bg-accent); color: var(--text); }
+.md-style-deepseek .marker-highlight { background: var(--marker-bg); color: var(--marker-color); }
+
+/* ── 输出风格：Opencode 风格——彩色标题（h1 琥珀 / h2 强调 / h3 成功）、
+ * 加粗琥珀、斜体灰、列表/引用差异化，层次最丰富 */
+.md-style-opencode h1, .md-style-opencode h2, .md-style-opencode h3, .md-style-opencode h4 { color: var(--accent); }
+.md-style-opencode h1 { color: var(--warning); border-bottom-color: var(--border-strong); font-weight: 750; }
+.md-style-opencode h2 { color: var(--accent); }
+.md-style-opencode h3 { color: var(--success); }
+.md-style-opencode strong { font-weight: 750; color: var(--warning); }
+.md-style-opencode em { color: var(--text-muted); font-style: italic; }
+.md-style-opencode blockquote { border-left-color: var(--warning); background: var(--warning-bg); color: var(--text); border-radius: 0 var(--radius-s) var(--radius-s) 0; }
+.md-style-opencode ul li::marker { color: var(--accent); }
+.md-style-opencode ol li::marker { color: var(--success); font-weight: 600; }
+.md-style-opencode a { color: var(--accent-hover); }
+.md-style-opencode hr { border-top: 1px dashed var(--border-strong); }
+
+/* ── 代码语法高亮令牌（highlight.js 只产 class；颜色用主题变量映射，
+ * 全部主题自适应——keyword=强调、string=成功、number=警告、comment=弱化） */
+.md pre code.hljs .hljs-keyword, .md pre code.hljs .hljs-selector-tag, .md pre code.hljs .hljs-type { color: var(--accent); }
+.md pre code.hljs .hljs-string, .md pre code.hljs .hljs-attr, .md pre code.hljs .hljs-regexp, .md pre code.hljs .hljs-template-string { color: var(--success); }
+.md pre code.hljs .hljs-number, .md pre code.hljs .hljs-literal, .md pre code.hljs .hljs-symbol, .md pre code.hljs .hljs-bullet { color: var(--warning); }
+.md pre code.hljs .hljs-comment, .md pre code.hljs .hljs-quote { color: var(--text-muted); font-style: italic; }
+.md pre code.hljs .hljs-title, .md pre code.hljs .hljs-function .hljs-title, .md pre code.hljs .hljs-section { color: var(--accent-hover); }
+.md pre code.hljs .hljs-keyword .hljs-string, .md pre code.hljs .hljs-params, .md pre code.hljs .hljs-variable { color: var(--text); }
+.md pre code.hljs .hljs-built_in, .md pre code.hljs .hljs-class .hljs-title { color: var(--accent); }
+.md pre code.hljs .hljs-meta, .md pre code.hljs .hljs-meta .hljs-keyword { color: var(--text-weak); }
+.md pre code.hljs .hljs-name, .md pre code.hljs .hljs-tag, .md pre code.hljs .hljs-attribute { color: var(--text-secondary); }
+.md pre code.hljs .hljs-deletion { color: var(--danger); background: var(--danger-bg); }
+.md pre code.hljs .hljs-addition { color: var(--success); background: var(--success-bg); }
+
 /* 暂不明示标记高亮（§6.1） */
 .marker-highlight { background: var(--marker-bg); color: var(--marker-color); border-radius: 3px; padding: 0 3px; font-weight: 600; }
 .marker-count { font-size: 11px; color: var(--warning); }

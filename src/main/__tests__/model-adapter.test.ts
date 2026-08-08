@@ -1,4 +1,4 @@
-/**
+﻿/**
  * model-adapter.test.ts — TDD tests for I7_T02 NativeModelAdapter
  *
  * Task: I7_T02 "ModelAdapter — NativeModelAdapter（OpenAI/DeepSeek tool_calls + ModelTransport 注入）"
@@ -2935,5 +2935,77 @@ describe('Options forwarding to transport', () => {
     expect(opts.maxTokens).toBe(200);
     expect(opts.temperature).toBe(0.3);
     expect(opts.signal).toBeDefined();
+  });
+});
+
+describe('Truncated（输出被 max_tokens 截断 → truncated 标志）', () => {
+  let NativeModelAdapterClass: new (transport: LocalModelTransport) => { provider: string; runTurn: (input: ModelTurnInput, options?: ModelTurnOptions) => Promise<ModelTurn> };
+  beforeAll(async () => {
+    const mod = await import('../agent-runtime/model-adapter');
+    NativeModelAdapterClass = mod.NativeModelAdapter;
+  });
+
+  it('非流式 finish_reason=length → final.truncated=true', async () => {
+    const mockTransport: LocalModelTransport = {
+      chat: async () => ({
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: '（被截断的长回答…）' },
+          finish_reason: 'length',
+        }],
+        usage: { inputTokens: 150, outputTokens: 8192 },
+      }),
+      chatStream: async function* () { /* noop */ },
+    };
+    const adapter = new NativeModelAdapterClass(mockTransport);
+    const result = await adapter.runTurn({
+      systemPrompt: 'test',
+      messages: [{ role: 'user', content: '详细评价' }],
+    });
+    expect(result.type).toBe('final');
+    if (result.type === 'final') {
+      expect(result.truncated).toBe(true);
+      expect(result.answer).toContain('被截断');
+    }
+  });
+
+  it('非流式 finish_reason=stop → truncated 缺省（undefined）', async () => {
+    const mockTransport: LocalModelTransport = {
+      chat: async () => ({
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: '完整回答' },
+          finish_reason: 'stop',
+        }],
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+      chatStream: async function* () { /* noop */ },
+    };
+    const adapter = new NativeModelAdapterClass(mockTransport);
+    const result = await adapter.runTurn({
+      systemPrompt: 'test',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    if (result.type === 'final') expect(result.truncated).toBeUndefined();
+  });
+
+  it('流式 done finishReason=length → final.truncated=true', async () => {
+    const mockTransport: LocalModelTransport = {
+      chat: async () => { throw new Error('should not call chat in streaming'); },
+      chatStream: async function* () {
+        yield { type: 'text_delta', content: '长回答' };
+        yield { type: 'done', finishReason: 'length', usage: { inputTokens: 10, outputTokens: 8192 } };
+      },
+    };
+    const adapter = new NativeModelAdapterClass(mockTransport);
+    const result = await adapter.runTurn({
+      systemPrompt: 'test',
+      messages: [{ role: 'user', content: '详细评价' }],
+    }, { onChunk: () => {} });
+    expect(result.type).toBe('final');
+    if (result.type === 'final') {
+      expect(result.truncated).toBe(true);
+      expect(result.answer).toBe('长回答');
+    }
   });
 });

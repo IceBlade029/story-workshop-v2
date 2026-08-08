@@ -544,6 +544,11 @@ export function messagesToResponsesInput(
       continue;
     }
     if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      // 思维链必须随工具轮回传（DeepSeek V4 thinking：缺失 reasoning_text 直接 400），
+      // 且 reasoning item 要先于 function_call / web_search_call（与响应输出顺序一致）
+      if (m.reasoning_content) {
+        items.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: m.reasoning_content }] });
+      }
       for (const tc of m.tool_calls) {
         if (tc.type === 'web_search') {
           const cached = webSearchItems.get(tc.id);
@@ -761,6 +766,8 @@ export async function responsesStream(
   let buffer = '';
   let currentEvent = '';
   const dataLines: string[] = [];
+  /** 本轮是否已通过 reasoning_text.delta 流式发过思维链（completed 兜底时避免重复） */
+  let streamedReasoning = false;
 
   const flushData = (): void => {
     if (dataLines.length === 0) return;
@@ -799,6 +806,7 @@ export async function responsesStream(
         emit({ content: parsed.delta ?? '', finishReason: null });
         break;
       case 'response.reasoning_text.delta':
+        streamedReasoning = true;
         emit({ content: '', finishReason: null, reasoningContent: parsed.delta ?? '' });
         break;
       case 'response.function_call_arguments.delta':
@@ -830,6 +838,13 @@ export async function responsesStream(
           full?.incomplete_details?.reason === 'max_output_tokens' ? 'length' :
           full?.incomplete_details?.reason === 'content_filter' ? 'content_filter' :
           responsesFinishReason(out);
+        // 思维链兜底：若工具轮（function/web_search）的思维链没有以 delta 事件
+        // 流式发出、只出现在 completed 完整 output 里，则补发 reasoning_delta，
+        // 否则 run-loop 拿不到 reasoning → 下一轮回传缺失 → DeepSeek 400
+        // （The reasoning_text in the thinking mode must be passed back）
+        if (out.reasoning && !streamedReasoning) {
+          emit({ content: '', finishReason: null, reasoningContent: out.reasoning });
+        }
         const webCalls = out.webSearchCalls.length > 0 ? out.webSearchCalls : undefined;
         emit({
           content: '',

@@ -917,6 +917,8 @@ export class AppService {
     const result = await this.runtime.coordinator.run({
       ...request,
       signal,
+      // 全局「最大输出长度」设置（长文评价被截断时可调大）
+      maxOutputTokens: getSettings().maxOutputTokens,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,
@@ -1181,6 +1183,7 @@ export class AppService {
       messages: [taskMessage],
       scope,
       resourceScope: { sceneId, format },
+      maxOutputTokens: getSettings().maxOutputTokens,
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
@@ -1227,6 +1230,7 @@ export class AppService {
       parentMessageId: parentId,
       supersedesMessageId: messageId,
       contextInfo: ctx.contextInfo,
+      maxOutputTokens: getSettings().maxOutputTokens,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,
@@ -1298,6 +1302,7 @@ export class AppService {
       messages: [taskMessage],
       scope: `就地改写：${node.title} · ${format}（${instruction.slice(0, 40)}）`,
       resourceScope: { sceneId, format },
+      maxOutputTokens: getSettings().maxOutputTokens,
       signal,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,

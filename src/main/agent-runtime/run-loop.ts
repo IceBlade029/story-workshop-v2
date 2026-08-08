@@ -52,6 +52,8 @@ export interface RunRequest {
    */
   resourceScope?: { sceneId: string; format: string };
   maxTurns?: number;
+  /** 单次模型调用的最大输出 tokens（来自全局设置；缺省 = API 默认） */
+  maxOutputTokens?: number;
   signal?: AbortSignal;
   /** 流式文本回调（final 回合） */
   onChunk?: (chunk: string) => void;
@@ -199,6 +201,7 @@ export class RunCoordinator {
     let cancelled = false;
     let error: string | undefined;
     let turns = 0;
+    let finalTruncated = false;
     const usage = { inputTokens: 0, outputTokens: 0 };
     // 工具调用序列（含耗时，进调用详情 §4.7）
     const toolDurations: Array<{ name: string; args: unknown; status: string; error?: string; durationMs: number }> = [];
@@ -220,6 +223,8 @@ export class RunCoordinator {
       try {
         turn = await this.deps.model.runTurn(input, {
           signal: request.signal,
+          // 全局「最大输出长度」设置（被截断时可调大；缺省不传 = API 默认）
+          ...(request.maxOutputTokens !== undefined ? { maxTokens: request.maxOutputTokens } : {}),
           // UI 推送回调的异常（如 webContents 已销毁）与 run 隔离：
           // 事件记录、工具写入、回答落盘照常进行（§8.1）
           onChunk: (chunk) => {
@@ -263,6 +268,7 @@ export class RunCoordinator {
 
       if (turn.type === 'final') {
         finalAnswer = turn.answer;
+        finalTruncated = turn.truncated === true;
         break;
       }
 
@@ -404,6 +410,8 @@ export class RunCoordinator {
         ...(request.supersedesMessageId ? { supersedesId: request.supersedesMessageId } : {}),
         toolTrace: traces.length > 0 ? traces : undefined,
         ...(reasoningText ? { reasoning: reasoningText, thinkingSeconds: Math.round(thinkingMs / 1000) } : {}),
+        // 被 max_output_tokens 截断：UI 显示「已截断」徽标
+        ...(finalTruncated ? { truncated: true } : {}),
       });
     }
 

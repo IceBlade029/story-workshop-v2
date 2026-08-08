@@ -252,4 +252,51 @@ describe('DeepSeekTransport — Responses API 路由', () => {
     // assistant 消息的 web_search tool_call 保留（transport 层不丢弃，转换在 llm-client 完成）
     expect(req.messages[1].tool_calls).toEqual([{ id: 'ws_1', type: 'web_search' }]);
   });
+
+  it('回归（缺口 A）：非流式搜索轮带思维链 → 虚拟化消息保留 reasoning_content', async () => {
+    responsesCompletion.mockResolvedValue({
+      content: '',
+      reasoningContent: '先搜一下最新消息',
+      finishReason: 'tool_calls',
+      webSearchCalls: [{ id: 'ws_1', status: 'in_progress', action: { type: 'search', queries: ['q'] } }],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    const transport = new DeepSeekTransport();
+    const res = await transport.chat([{ role: 'user', content: '搜一下' }], wsTools);
+    // 思维链随搜索轮保留：run-loop 才能在下轮回传，否则 DeepSeek 400
+    expect(res.choices[0].message.reasoning_content).toBe('先搜一下最新消息');
+    expect(res.choices[0].message.tool_calls).toHaveLength(1);
+  });
+
+  it('回归（链路级）：run-loop 工具轮消息（assistant 思维链 + tool_calls + tool 结果）→ Responses 请求 messages 保留 reasoning_content', async () => {
+    responsesCompletion.mockResolvedValue({
+      content: '继续',
+      finishReason: 'stop',
+      usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+    });
+    const transport = new DeepSeekTransport();
+    // 模拟 run-loop turnContext：turn 1 模型思考后调用 read_attachment（用户场景：上传附件）
+    await transport.chat(
+      [
+        { role: 'user', content: '读一下附件里的设定' },
+        {
+          role: 'assistant',
+          content: '',
+          reasoning_content: '附件内容较大，先调用 read_attachment 读取',
+          tool_calls: [{ id: 'call_1', name: 'read_attachment', arguments: { attachmentId: 'att_1' } }],
+        },
+        { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' },
+      ],
+      [{ type: 'function', name: 'read_attachment' }, { type: 'web_search' }],
+    );
+    const req = responsesCompletion.mock.calls[0][0] as { messages: Array<Record<string, unknown>> };
+    const assistantMsg = req.messages[1];
+    expect(assistantMsg.role).toBe('assistant');
+    // 思维链必须随工具轮完整回传（缺失 → DeepSeek 400 reasoning_text must be passed back）
+    expect(assistantMsg.reasoning_content).toBe('附件内容较大，先调用 read_attachment 读取');
+    expect(assistantMsg.content).toBeNull();
+    expect(assistantMsg.tool_calls).toEqual([
+      { id: 'call_1', type: 'function', function: { name: 'read_attachment', arguments: '{"attachmentId":"att_1"}' } },
+    ]);
+  });
 });

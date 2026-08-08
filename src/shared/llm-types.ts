@@ -12,6 +12,9 @@ export type DeepSeekModelId = 'deepseek-v4-flash' | 'deepseek-v4-pro';
 /** 界面主题（主题系统：仅覆盖设计令牌，不动组件结构）。 */
 export type ThemeId = 'system' | 'parchment' | 'nebula' | 'sakura' | 'emerald';
 
+/** 对话回答的 Markdown 渲染样式（输出系统：plain = 原样文本；其余为渲染风格）。 */
+export type OutputStyle = 'plain' | 'standard' | 'deepseek' | 'opencode';
+
 /** 全局设置（明文存于 ~/.story-workshop/settings.json，非敏感）。 */
 export interface AppSettings {
   model: DeepSeekModelId;
@@ -23,6 +26,10 @@ export interface AppSettings {
   notifications: boolean;
   /** 界面主题（缺省跟随系统；设置存 settings.json，首帧镜像存 localStorage） */
   theme: ThemeId;
+  /** 对话回答渲染样式（默认 DeepSeek 风格：彩色标题/加粗/代码高亮） */
+  outputStyle: OutputStyle;
+  /** 单次模型调用最大输出 tokens（长文评价被截断时可调大） */
+  maxOutputTokens: number;
 }
 
 export interface LLMConfig {
@@ -165,6 +172,13 @@ export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'high', 'max'];
 
 export const THEME_IDS: ThemeId[] = ['system', 'parchment', 'nebula', 'sakura', 'emerald'];
 
+export const OUTPUT_STYLES: OutputStyle[] = ['plain', 'standard', 'deepseek', 'opencode'];
+
+/** 最大输出 tokens 可选档位（DeepSeek V4 输出上限内）。 */
+export const MAX_OUTPUT_TOKEN_OPTIONS = [4096, 8192, 16384, 32768] as const;
+
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
 export function defaultSettings(): AppSettings {
   return {
     model: DEEPSEEK_DEFAULT_MODEL,
@@ -172,5 +186,7 @@ export function defaultSettings(): AppSettings {
     reasoningEffort: 'high',
     notifications: true,
     theme: 'system',
+    outputStyle: 'deepseek',
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   };
 }

@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { defaultSettings, THEME_IDS, type AppSettings, type ThemeId } from '../shared/llm-types';
+import { defaultSettings, THEME_IDS, OUTPUT_STYLES, MAX_OUTPUT_TOKEN_OPTIONS, type AppSettings, type ThemeId, type OutputStyle } from '../shared/llm-types';
 
 let settingsDir = path.join(os.homedir(), '.story-workshop');
 
@@ -25,6 +25,14 @@ function isThemeId(v: unknown): v is ThemeId {
   return typeof v === 'string' && (THEME_IDS as readonly string[]).includes(v);
 }
 
+function isOutputStyle(v: unknown): v is OutputStyle {
+  return typeof v === 'string' && (OUTPUT_STYLES as readonly string[]).includes(v);
+}
+
+function isMaxOutputTokens(v: unknown): v is number {
+  return typeof v === 'number' && (MAX_OUTPUT_TOKEN_OPTIONS as readonly number[]).includes(v);
+}
+
 export function getSettings(): AppSettings {
   const defaults = defaultSettings();
   try {
@@ -36,6 +44,8 @@ export function getSettings(): AppSettings {
       reasoningEffort: raw.reasoningEffort === 'low' || raw.reasoningEffort === 'max' ? raw.reasoningEffort : defaults.reasoningEffort,
       notifications: typeof raw.notifications === 'boolean' ? raw.notifications : defaults.notifications,
       theme: isThemeId(raw.theme) ? raw.theme : defaults.theme,
+      outputStyle: isOutputStyle(raw.outputStyle) ? raw.outputStyle : defaults.outputStyle,
+      maxOutputTokens: isMaxOutputTokens(raw.maxOutputTokens) ? raw.maxOutputTokens : defaults.maxOutputTokens,
     };
   } catch {
     return defaults;
@@ -47,8 +57,10 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
   const next: AppSettings = {
     ...current,
     ...partial,
-    // 逐字段白名单：theme 非法值回退当前值，防止脏写进 settings.json
+    // 逐字段白名单：theme / outputStyle / maxOutputTokens 非法值回退当前值，防止脏写进 settings.json
     theme: isThemeId(partial.theme) ? partial.theme : current.theme,
+    outputStyle: isOutputStyle(partial.outputStyle) ? partial.outputStyle : current.outputStyle,
+    maxOutputTokens: isMaxOutputTokens(partial.maxOutputTokens) ? partial.maxOutputTokens : current.maxOutputTokens,
   };
   if (!fs.existsSync(settingsDir)) fs.mkdirSync(settingsDir, { recursive: true });
   // 原子写：临时文件 + rename

@@ -141,6 +141,48 @@ describe('messagesToResponsesInput', () => {
       { type: 'message', role: 'assistant', content: '答案' },
     ]);
   });
+
+  it('回归：assistant（tool_calls + reasoning_content）→ reasoning item 先于 function_call 回传', () => {
+    const items = messagesToResponsesInput(
+      [
+        {
+          role: 'assistant',
+          content: null,
+          reasoning_content: '先想了想再调工具',
+          tool_calls: [{ id: 'call_1', type: 'function' as const, function: { name: 'read_node', arguments: '{"nodeId":"n1"}' } }],
+        },
+        { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' },
+      ],
+      new Map(),
+    );
+    // 思维链缺失 → DeepSeek Responses API 400「reasoning_text must be passed back」
+    expect(items).toEqual([
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '先想了想再调工具' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'read_node', arguments: '{"nodeId":"n1"}' },
+      { type: 'function_call_output', call_id: 'call_1', output: '{"ok":true}' },
+    ]);
+  });
+
+  it('回归：assistant（web_search_call + reasoning_content）→ reasoning item 先于 web_search_call 回传', () => {
+    const cached = new Map<string, WebSearchCallItem>([
+      ['ws_1', { id: 'ws_1', status: 'completed', action: { type: 'search', queries: ['q'] } }],
+    ]);
+    const items = messagesToResponsesInput(
+      [
+        {
+          role: 'assistant',
+          content: null,
+          reasoning_content: '需要查一下',
+          tool_calls: [{ id: 'ws_1', type: 'web_search' as const }],
+        },
+      ],
+      cached,
+    );
+    expect(items).toEqual([
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: '需要查一下' }] },
+      { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', queries: ['q'] } },
+    ]);
+  });
 });
 
 // ===========================================================================
@@ -379,5 +421,85 @@ describe('responsesStream', () => {
     expect(argsDelta?.toolCalls![0].function?.arguments).toBe('{"nodeId":"n1"}');
     const usageChunk = received.find((c) => c.usage);
     expect(usageChunk!.finishReason).toBe('tool_calls');
+  });
+
+  it('回归：工具轮思维链只在 completed output 里（无 delta 事件）→ 补发 reasoning_delta，run-loop 可累积回传', async () => {
+    const { responsesStream } = await import('../llm-client');
+    const chunks: string[] = [
+      sseEvent('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'function_call', id: 'call_1', name: 'read_attachment' },
+      }),
+      sseEvent('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', output_index: 0, delta: '{"attachmentId":"att_1"}' }),
+      // 思维链没有 reasoning_text.delta 事件，只出现在 completed 的完整 output 里
+      sseEvent('response.completed', {
+        type: 'response.completed',
+        response: {
+          id: 'r4',
+          status: 'completed',
+          output: [
+            { type: 'reasoning', content: [{ type: 'reasoning_text', text: '附件内容较大，需要先读取' }] },
+            { type: 'function_call', id: 'call_1', name: 'read_attachment', arguments: '{"attachmentId":"att_1"}' },
+          ],
+          usage: usagePayload,
+        },
+      }),
+    ];
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(createStreamResponse(chunks));
+
+    const received: LLMStreamChunk[] = [];
+    await responsesStream(
+      { messages: [{ role: 'user', content: '读一下附件' }], stream: true },
+      new Map(),
+      (chunk) => { received.push(chunk); },
+    );
+
+    // 补发的 reasoning_delta 必须出现在 done（usage）chunk 之前
+    const reasoningChunks = received.filter((c) => c.reasoningContent);
+    expect(reasoningChunks.length).toBe(1);
+    expect(reasoningChunks[0].reasoningContent).toBe('附件内容较大，需要先读取');
+    const usageIdx = received.findIndex((c) => c.usage);
+    expect(received.findIndex((c) => c.reasoningContent)).toBeLessThan(usageIdx);
+    expect(received[usageIdx].finishReason).toBe('tool_calls');
+  });
+
+  it('回归：思维链已通过 delta 流式发出 + completed output 也有 → 不重复补发', async () => {
+    const { responsesStream } = await import('../llm-client');
+    const chunks: string[] = [
+      sseEvent('response.reasoning_text.delta', { type: 'response.reasoning_text.delta', delta: '先想一想' }),
+      sseEvent('response.reasoning_text.delta', { type: 'response.reasoning_text.delta', delta: '再调工具' }),
+      sseEvent('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: { type: 'function_call', id: 'call_1', name: 'read_node' },
+      }),
+      sseEvent('response.completed', {
+        type: 'response.completed',
+        response: {
+          id: 'r5',
+          status: 'completed',
+          output: [
+            { type: 'reasoning', content: [{ type: 'reasoning_text', text: '先想一想再调工具' }] },
+            { type: 'function_call', id: 'call_1', name: 'read_node', arguments: '{}' },
+          ],
+          usage: usagePayload,
+        },
+      }),
+    ];
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(createStreamResponse(chunks));
+
+    const received: LLMStreamChunk[] = [];
+    await responsesStream(
+      { messages: [{ role: 'user', content: 'hi' }], stream: true },
+      new Map(),
+      (chunk) => { received.push(chunk); },
+    );
+
+    // 只有 delta 流式的两次增量，completed 的 reasoning 不重复补发
+    expect(received.filter((c) => c.reasoningContent)).toHaveLength(2);
+    expect(received.filter((c) => c.reasoningContent).map((c) => c.reasoningContent).join('')).toBe('先想一想再调工具');
   });
 });

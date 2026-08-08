@@ -6,7 +6,8 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { store, useStore } from '../../store';
 import { THEMES } from '../../theme';
-import type { AppSettings, ThemeId } from '../../../shared/llm-types';
+import { MAX_OUTPUT_TOKEN_OPTIONS } from '../../../shared/llm-types';
+import type { AppSettings, OutputStyle, ThemeId } from '../../../shared/llm-types';
 
 export function SettingsDialog({ onClose }: { onClose: () => void }): React.ReactElement | null {
   const project = useStore((s) => s.project);
@@ -82,6 +83,35 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
                   {settings?.theme === t.id && <span className="muted small" style={{ marginLeft: 'auto' }}>使用中</span>}
                 </button>
               ))}
+            </div>
+
+            <div className="ws-head" style={{ marginTop: 8 }}><h3>输出</h3></div>
+            <div className="row">
+              <label className="muted small">回答样式</label>
+              <select
+                value={settings?.outputStyle ?? 'deepseek'}
+                disabled={saving}
+                onChange={(e) => void update({ outputStyle: e.target.value as OutputStyle })}
+              >
+                <option value="plain">纯文本（不渲染标记）</option>
+                <option value="standard">标准 Markdown（克制）</option>
+                <option value="deepseek">DeepSeek 风格（默认）</option>
+                <option value="opencode">Opencode 风格（彩色）</option>
+              </select>
+              <span className="muted small">对话回答的 Markdown 渲染风格（标题/加粗/代码高亮）</span>
+            </div>
+            <div className="row">
+              <label className="muted small">最大输出长度</label>
+              <select
+                value={settings?.maxOutputTokens ?? 16384}
+                disabled={saving}
+                onChange={(e) => void update({ maxOutputTokens: Number(e.target.value) })}
+              >
+                {MAX_OUTPUT_TOKEN_OPTIONS.map((n) => (
+                  <option key={n} value={n}>{n.toLocaleString()} tokens</option>
+                ))}
+              </select>
+              <span className="muted small">单次回答上限；长文深度评价被截断（出现「已截断」标记）时调大</span>
             </div>
 
             <div className="ws-head" style={{ marginTop: 8 }}><h3>模型</h3></div>

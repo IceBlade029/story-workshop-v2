@@ -237,6 +237,10 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
   const project = useStore((s) => s.project);
   const activePath = useStore((s) => s.activePath);
   const running = useStore((s) => s.activeRun?.status === 'running');
+  // 输出样式（输出系统：对话回答的 Markdown 渲染风格）
+  const outputStyle = project?.settings.outputStyle ?? 'deepseek';
+  // 重新生成就地替换（bug 修复）：该消息正在被刷新 → 立即用流式卡片替换旧回答
+  const refreshingRun = useStore((s) => (s.refreshingMessageId === message.id ? s.activeRun : null));
   const attachment = message.refs?.attachmentIds
     ? project?.attachments.find((m) => message.refs!.attachmentIds!.includes(m.id))
     : undefined;
@@ -244,6 +248,36 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
   const [editText, setEditText] = React.useState('');
   const [showReasoning, setShowReasoning] = React.useState(false);
   const [inspectOpen, setInspectOpen] = React.useState(false);
+
+  // 重新生成中：旧回答立即被流式卡片替换（DeepSeek 式就地刷新）
+  if (message.role === 'ai' && refreshingRun && refreshingRun.status === 'running') {
+    const reasoningText = refreshingRun.reasoning.join('');
+    const chunks = refreshingRun.chunks.join('');
+    return (
+      <div className="msg msg-streaming">
+        <div className="msg-head">
+          <span className="avatar avatar-ai">AI</span>
+          <span className="msg-role">AI</span>
+          <span className="badge badge-ai">重新生成中…</span>
+          {reasoningText && (
+            <button className="tiny-btn" onClick={() => setShowReasoning(!showReasoning)}>
+              {showReasoning ? '收起思考' : `思考中（${reasoningText.length} 字）`}
+            </button>
+          )}
+        </div>
+        {showReasoning && reasoningText && (
+          <div className="msg-content muted small" style={{ fontSize: 12, marginBottom: 6 }}>
+            {reasoningText.slice(-600)}
+          </div>
+        )}
+        {chunks ? (
+          <MarkdownView text={chunks} style={outputStyle} />
+        ) : (
+          <pre className="msg-content">{reasoningText ? '' : '（重新生成中…）'}</pre>
+        )}
+      </div>
+    );
+  }
 
   if (message.role === 'system') {
     // 用户反馈：运行开始/结束细条不再显示（日志保留，整理光标/压缩逻辑不受影响）；
@@ -293,6 +327,11 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
           {message.role === 'user' ? '你' : 'AI'}
         </span>
         <span className="msg-role">{message.role === 'user' ? '你' : 'AI'}</span>
+        {message.truncated && (
+          <span className="badge badge-stale" title="回答达到最大输出长度被截断，可在设置中调大「最大输出长度」">
+            已截断 · 可调大输出上限
+          </span>
+        )}
         <VersionNav message={message} />
         <span className="msg-time">{new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
@@ -330,7 +369,7 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
           <pre className="msg-content">{message.content}</pre>
         )
       ) : (
-        <MarkdownView text={message.content} />
+        <MarkdownView text={message.content} style={outputStyle} />
       )}
       {/* DeepSeek 式：重新生成按钮常驻在最后一条 AI 回答下方（◀ ▶ 版本导航在头部） */}
       {isLastAi && !archivedView && (
@@ -372,6 +411,9 @@ function MessageItem({ message, archivedView }: { message: ChatMessage; archived
 function StreamingIndicator(): React.ReactElement | null {
   const activeRun = useStore((s) => s.activeRun);
   const project = useStore((s) => s.project);
+  const outputStyle = project?.settings.outputStyle ?? 'deepseek';
+  // 重新生成：流式内容已在原消息位置就地渲染（MessageItem），底部不再叠加新卡片
+  const refreshing = useStore((s) => s.refreshingMessageId !== null);
   const [elapsed, setElapsed] = React.useState(0);
   const [showReasoning, setShowReasoning] = React.useState(false);
   React.useEffect(() => {
@@ -385,6 +427,7 @@ function StreamingIndicator(): React.ReactElement | null {
   }, [activeRun?.runId, activeRun?.status]);
   // §5.1/§5.3：正文生成与就地改写（detail_fill / revise）在正文模块内流式显示，讨论模块零打扰
   if (!activeRun || activeRun.kind === 'detail_fill' || activeRun.kind === 'revise') return null;
+  if (refreshing) return null;
   const reasoningText = activeRun.reasoning.join('');
   const reasoningActive = reasoningText.length > 0;
   const chunks = activeRun.chunks.join('');
@@ -478,7 +521,7 @@ function StreamingIndicator(): React.ReactElement | null {
       )}
       {chunks ? (
         // §4.1：流式期间即时渲染 markdown（当前是 <pre> 原文，完成后才渲染，体验断裂）
-        <MarkdownView text={chunks} />
+        <MarkdownView text={chunks} style={outputStyle} />
       ) : (
         <pre className="msg-content">{reasoningActive ? '' : '（思考中…）'}</pre>
       )}
