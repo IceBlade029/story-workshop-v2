@@ -23,9 +23,11 @@ import { ConversationPane } from './components/ConversationPane';
 import { Workspace } from './components/Workspace';
 import { WritingModule } from './components/WritingModule';
 import { SettingsDialog } from './components/ui/SettingsDialog';
+import { ThemePicker } from './components/ui/ThemePicker';
 import { GlobalSearchDialog } from './components/ui/GlobalSearchDialog';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { DialogHost } from './components/ui/dialog';
+import { applyTheme } from './theme';
 import './styles.css';
 
 const MIN_LEFT = 180;
@@ -84,6 +86,9 @@ function ProjectScreen(): React.ReactElement {
 
   return (
     <div className="project-screen">
+      <div className="project-screen-top">
+        <ThemePicker />
+      </div>
       <h1>故事工坊</h1>
       <p className="subtitle">大模型辅助故事创作：讨论 → 整理 → 细纲 → 可见视图 → 正文</p>
 
@@ -286,6 +291,7 @@ function TopBar(): React.ReactElement {
         专注
       </button>
       <span className="spacer" />
+      <ThemePicker />
       <button className="tiny-btn" onClick={() => setSettingsOpen(true)} title="设置（弹窗）">⚙</button>
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
     </div>
@@ -308,6 +314,16 @@ function App(): React.ReactElement {
     setCols({ left: loadWidth('sw2:col-left', 250), right: loadWidth('sw2:col-right', 340) });
     store.initCollapsed();
   }, []);
+
+  // 主题校正：project.settings.theme 为权威值（settings.json），
+  // 打开项目/刷新状态时与 DOM 同步（首帧镜像由 entry.tsx 处理）。
+  const lastAppliedTheme = React.useRef<string | null>(null);
+  useEffect(() => {
+    if (project && lastAppliedTheme.current !== project.settings.theme) {
+      lastAppliedTheme.current = project.settings.theme;
+      applyTheme(project.settings.theme);
+    }
+  }, [project]);
 
   // 订阅主进程 run 流式事件
   useEffect(() => {

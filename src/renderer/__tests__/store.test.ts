@@ -59,7 +59,7 @@ function makeProject(overrides: Partial<ProjectState> = {}): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' },
     ...overrides,
   };
 }
@@ -144,7 +144,7 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       accept: vi.fn(async () => project),
       rollback: vi.fn(async () => project),
     },
-    settings: { setKey: vi.fn(async () => project), update: vi.fn(async () => project) },
+    settings: { setKey: vi.fn(async () => project), get: vi.fn(async () => project.settings), update: vi.fn(async () => project) },
   };
   return { ...stub, ...overrides } as RendererApi;
 }

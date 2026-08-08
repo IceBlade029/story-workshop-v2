@@ -355,7 +355,10 @@ export interface RendererApi {
   };
   settings: {
     setKey(key: string): Promise<ProjectState>;
-    /** 更新全局设置（模型 / 思考模式 / 思考强度，DeepSeek V4） */
-    update(partial: Partial<AppSettings>): Promise<ProjectState>;
+    /** 读取全局设置（无项目打开时也可用：启动首帧主题校正等） */
+    get(): Promise<AppSettings>;
+    /** 更新全局设置（模型 / 思考模式 / 思考强度 / 主题，DeepSeek V4）。
+     * 无项目打开时返回 null（设置是全局的，与项目无关）。 */
+    update(partial: Partial<AppSettings>): Promise<ProjectState | null>;
   };
 }

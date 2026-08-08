@@ -1,6 +1,9 @@
-import { describe, it, expect, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll, vi, beforeEach, afterEach } from 'vitest';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import { AppService } from '../app-service';
+import { configureSettingsDir, getSettings } from '../settings-store';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import { makeTempDir, removeDir } from './helpers/temp-project';
 import type { ModelAdapter, ModelTurnInput, ModelTurn } from '../agent-runtime/model-types';
@@ -681,5 +684,34 @@ describe('app-service — 附件正文内联（Part 5：首轮上下文直接注
     expect(content).toContain('新版本问题');
     expect(content).not.toContain('已废弃的旧文本');
     expect(content).not.toContain('消息已编辑');
+  });
+});
+
+describe('app-service — 设置（全局设置与项目解耦）', () => {
+  let settingsDir: string;
+  beforeEach(() => {
+    settingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw2-svc-settings-'));
+    configureSettingsDir(settingsDir);
+  });
+  afterEach(() => {
+    try { fs.rmSync(settingsDir, { recursive: true, force: true }); } catch { /* noop */ }
+    configureSettingsDir(undefined);
+  });
+
+  it('无项目打开时 updateSettings 不抛错、返回 null，且配置落盘（项目首页换主题回归）', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    // 回归：workspace getter 无项目时抛 NO_PROJECT_OPEN，曾导致换主题静默失败
+    const result = service.updateSettings({ theme: 'nebula' });
+    expect(result).toBeNull();
+    expect(getSettings().theme).toBe('nebula');
+  });
+
+  it('有项目打开时 updateSettings 返回项目状态', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    const root = makeTempDir();
+    tempDirs.push(root);
+    service.createProject(path.join(root, 'proj'), '测试项目');
+    const result = service.updateSettings({ theme: 'sakura' });
+    expect(result?.settings.theme).toBe('sakura');
   });
 });

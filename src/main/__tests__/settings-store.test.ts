@@ -29,27 +29,37 @@ afterAll(() => {
 });
 
 describe('settings-store', () => {
-  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开）', () => {
+  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开 · 主题跟随系统）', () => {
     const s = getSettings();
-    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true });
+    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' });
   });
 
   it('保存并读回；非法值回退默认', () => {
     saveSettings({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max' });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true, theme: 'system' });
 
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe' }), 'utf-8');
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe', theme: 'rainbow' }), 'utf-8');
     const s = getSettings();
     expect(s.model).toBe('deepseek-v4-flash');
     expect(s.thinking).toBe(true);
     expect(s.reasoningEffort).toBe('high');
     expect(s.notifications).toBe(true);
+    expect(s.theme).toBe('system');
   });
 
   it('部分更新保留其余字段', () => {
     saveSettings({ model: 'deepseek-v4-pro' });
     saveSettings({ thinking: false });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true, theme: 'system' });
+  });
+
+  it('主题：保存并读回；非法值写不进去', () => {
+    saveSettings({ theme: 'nebula' });
+    expect(getSettings().theme).toBe('nebula');
+    // 非法主题 → 保留当前值（不入库）
+    const next = saveSettings({ theme: 'rainbow' as never });
+    expect(next.theme).toBe('nebula');
+    expect(getSettings().theme).toBe('nebula');
   });
 
   it('损坏文件 → 回退默认', () => {

@@ -1460,10 +1460,17 @@ export class AppService {
     return this.getState();
   }
 
-  /** 更新全局设置（模型 / 思考模式 / 思考强度，DeepSeek V4）。 */
-  updateSettings(partial: Partial<AppSettings>): ProjectState {
+  /** 更新全局设置（模型 / 思考模式 / 思考强度 / 主题，DeepSeek V4）。
+   * 无项目打开时（项目首页换主题）返回 null——设置是全局的，与项目无关。
+   * 注意：不能用 this.workspace 判空（getter 无项目时抛 NO_PROJECT_OPEN）。 */
+  updateSettings(partial: Partial<AppSettings>): ProjectState | null {
     saveSettings(partial);
-    return this.getState();
+    return this.runtime ? this.getState() : null;
+  }
+
+  /** 全局设置快照（无项目打开时也可用：启动首帧主题校正）。 */
+  getAppSettings(): AppSettings {
+    return getSettings();
   }
 
   hasApiKeyConfigured(): boolean {

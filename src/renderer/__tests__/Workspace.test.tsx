@@ -33,7 +33,7 @@ function makeProject(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' },
   };
 }
 
@@ -84,7 +84,7 @@ function makeApi(): RendererApi {
       revise: vi.fn(async () => ({ runId: 'r' })), list: vi.fn(async () => []), inspect: vi.fn(async () => null),
       diff: vi.fn(async () => []), accept: vi.fn(async () => project), rollback: vi.fn(async () => project),
     },
-    settings: { setKey: vi.fn(async () => project), update: vi.fn(async () => project) },
+    settings: { setKey: vi.fn(async () => project), get: vi.fn(async () => project.settings), update: vi.fn(async () => project) },
   };
 }
 

@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { defaultSettings, type AppSettings } from '../shared/llm-types';
+import { defaultSettings, THEME_IDS, type AppSettings, type ThemeId } from '../shared/llm-types';
 
 let settingsDir = path.join(os.homedir(), '.story-workshop');
 
@@ -20,6 +20,10 @@ export function configureSettingsDir(dir: string | undefined): void {
 }
 
 const SETTINGS_FILE = () => path.join(settingsDir, 'settings.json');
+
+function isThemeId(v: unknown): v is ThemeId {
+  return typeof v === 'string' && (THEME_IDS as readonly string[]).includes(v);
+}
 
 export function getSettings(): AppSettings {
   const defaults = defaultSettings();
@@ -31,6 +35,7 @@ export function getSettings(): AppSettings {
       thinking: typeof raw.thinking === 'boolean' ? raw.thinking : defaults.thinking,
       reasoningEffort: raw.reasoningEffort === 'low' || raw.reasoningEffort === 'max' ? raw.reasoningEffort : defaults.reasoningEffort,
       notifications: typeof raw.notifications === 'boolean' ? raw.notifications : defaults.notifications,
+      theme: isThemeId(raw.theme) ? raw.theme : defaults.theme,
     };
   } catch {
     return defaults;
@@ -38,7 +43,13 @@ export function getSettings(): AppSettings {
 }
 
 export function saveSettings(partial: Partial<AppSettings>): AppSettings {
-  const next: AppSettings = { ...getSettings(), ...partial };
+  const current = getSettings();
+  const next: AppSettings = {
+    ...current,
+    ...partial,
+    // 逐字段白名单：theme 非法值回退当前值，防止脏写进 settings.json
+    theme: isThemeId(partial.theme) ? partial.theme : current.theme,
+  };
   if (!fs.existsSync(settingsDir)) fs.mkdirSync(settingsDir, { recursive: true });
   // 原子写：临时文件 + rename
   const tmp = `${SETTINGS_FILE()}.tmp`;

@@ -4,7 +4,8 @@
  */
 import React from 'react';
 import { store, useStore } from '../../store';
-import type { AppSettings } from '../../../shared/llm-types';
+import { THEMES } from '../../theme';
+import type { AppSettings, ThemeId } from '../../../shared/llm-types';
 
 export function SettingsDialog({ onClose }: { onClose: () => void }): React.ReactElement | null {
   const project = useStore((s) => s.project);
@@ -47,6 +48,39 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
               >
                 保存
               </button>
+            </div>
+
+            <div className="ws-head" style={{ marginTop: 8 }}><h3>外观</h3></div>
+            <p className="muted small">主题只改界面配色，不影响正文内容；单击卡片即刻应用。</p>
+            <div className="theme-grid">
+              {THEMES.map((t) => (
+                <button
+                  key={t.id}
+                  className={`theme-card${settings?.theme === t.id ? ' active' : ''}`}
+                  disabled={saving || !t.available}
+                  title={t.available ? undefined : '即将推出'}
+                  onClick={() => void update({ theme: t.id as ThemeId })}
+                >
+                  <span className="theme-card-thumb" style={{ background: t.thumb.bg }}>
+                    <span className="tc-bar" style={{ background: t.thumb.bar, display: 'block', borderBottom: '1px solid rgba(0,0,0,.1)' }} />
+                    <span className="tc-body">
+                      <span style={{ background: t.thumb.left }} />
+                      <span style={{ background: t.thumb.mid }} />
+                      <span style={{ background: t.thumb.right }} />
+                    </span>
+                  </span>
+                  <span className="theme-card-info">
+                    <span className="theme-name">{t.name}</span>
+                    <span className="theme-meta">{t.mode}</span>
+                    <span className="row" style={{ gap: 4, marginTop: 2 }}>
+                      {t.colors.map((c) => (
+                        <span key={c} className="theme-swatch" style={{ background: c, width: 12, height: 12 }} />
+                      ))}
+                    </span>
+                  </span>
+                  {settings?.theme === t.id && <span className="muted small" style={{ marginLeft: 'auto' }}>使用中</span>}
+                </button>
+              ))}
             </div>
 
             <div className="ws-head" style={{ marginTop: 8 }}><h3>模型</h3></div>

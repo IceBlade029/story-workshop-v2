@@ -42,7 +42,7 @@ function makeProjectState(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system' },
   };
 }
 
@@ -137,7 +137,11 @@ function makeApi(): RendererApi {
       accept: vi.fn(async () => project),
       rollback: vi.fn(async () => project),
     },
-    settings: { setKey: vi.fn(async () => project), update: vi.fn(async () => project) },
+    settings: {
+      setKey: vi.fn(async () => project),
+      get: vi.fn(async () => project.settings),
+      update: vi.fn(async () => project),
+    },
   };
 }
 
@@ -543,6 +547,127 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(edit).toHaveBeenCalledWith('m1', '写个开头（修改版）');
+  });
+});
+
+describe('主题系统 — 切换持久化（data-theme + localStorage 镜像 + settings.update）', () => {
+  afterEach(() => {
+    delete document.documentElement.dataset.theme;
+    window.localStorage.removeItem('sw2:theme');
+  });
+
+  it('顶栏 🎨：打开浮层 → 点星云夜航 → data-theme / 镜像 / settings.update 全生效', async () => {
+    const api = makeApi();
+    const update = vi.fn(async () => makeProjectState());
+    api.settings.update = update;
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('主题（外观）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('星云夜航')).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByText('星云夜航'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(update).toHaveBeenCalledWith({ theme: 'nebula' });
+    expect(document.documentElement.dataset.theme).toBe('nebula');
+    expect(window.localStorage.getItem('sw2:theme')).toBe('nebula');
+    // 浮层已关闭
+    expect(screen.queryByText('外观主题')).toBeNull();
+  });
+
+  it('项目首页（无项目）也可切换主题；不影响创建项目流程', async () => {
+    const api = makeApi();
+    // 无项目打开：settings:update 返回 null（主进程真实行为）
+    const update = vi.fn(async () => null);
+    api.settings.update = update;
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('主题（外观）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 五套主题全部可点；点翡翠秘境切换
+    await act(async () => {
+      fireEvent.click(screen.getByText('翡翠秘境'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(update).toHaveBeenCalledWith({ theme: 'emerald' });
+    expect(document.documentElement.dataset.theme).toBe('emerald');
+    expect(screen.getByTestId('project-create')).toBeTruthy();
+  });
+
+  it('settings:update 失败时回滚到点击前实际生效的主题（不是上一次点击的相邻主题）', async () => {
+    const api = makeApi();
+    api.settings.update = vi.fn(async () => {
+      throw new Error('NO_PROJECT_OPEN');
+    });
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    // 第一次点击星云夜航：预览后失败 → 回滚到 system
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('主题（外观）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('星云夜航'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.documentElement.dataset.theme).toBe('system');
+    // 第二次点击羊皮手稿：失败后应回到「实际生效的」system，
+    // 而不是旧实现 rollback 的 render 闭包 current（= 上一次点击的星云夜航，相邻错位）
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('主题（外观）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('羊皮手稿'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.documentElement.dataset.theme).toBe('system');
+  });
+
+  it('设置弹窗：外观区域显示主题预览卡，点击切换并标记「使用中」', async () => {
+    const api = makeApi();
+    const nebulaState = (): ProjectState => {
+      const p = makeProjectState();
+      return { ...p, settings: { ...p.settings, theme: 'nebula' as const } };
+    };
+    api.settings.update = vi.fn(async () => nebulaState());
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // 打开设置
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('设置（弹窗）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('外观')).toBeTruthy();
+    // 跟随系统卡片当前标记；点击星云夜航 → 切换
+    expect(screen.getAllByText('使用中').length).toBeGreaterThan(0);
+    await act(async () => {
+      fireEvent.click(screen.getByText('星云夜航'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(api.settings.update).toHaveBeenCalledWith({ theme: 'nebula' });
+    expect(document.documentElement.dataset.theme).toBe('nebula');
+    expect(screen.getAllByText('使用中').length).toBeGreaterThan(0);
   });
 });
 

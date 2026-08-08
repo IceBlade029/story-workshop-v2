@@ -9,6 +9,9 @@ export type ReasoningEffort = 'low' | 'high' | 'max';
 /** 模型选项（DeepSeek V4：flash = 快，pro = 强）。 */
 export type DeepSeekModelId = 'deepseek-v4-flash' | 'deepseek-v4-pro';
 
+/** 界面主题（主题系统：仅覆盖设计令牌，不动组件结构）。 */
+export type ThemeId = 'system' | 'parchment' | 'nebula' | 'sakura' | 'emerald';
+
 /** 全局设置（明文存于 ~/.story-workshop/settings.json，非敏感）。 */
 export interface AppSettings {
   model: DeepSeekModelId;
@@ -18,6 +21,8 @@ export interface AppSettings {
   reasoningEffort: ReasoningEffort;
   /** 完成通知（ux-review §4.1：窗口后台时任务完成发桌面通知，可关） */
   notifications: boolean;
+  /** 界面主题（缺省跟随系统；设置存 settings.json，首帧镜像存 localStorage） */
+  theme: ThemeId;
 }
 
 export interface LLMConfig {
@@ -158,11 +163,14 @@ export const DEEPSEEK_MODELS: DeepSeekModelId[] = ['deepseek-v4-flash', 'deepsee
 
 export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'high', 'max'];
 
+export const THEME_IDS: ThemeId[] = ['system', 'parchment', 'nebula', 'sakura', 'emerald'];
+
 export function defaultSettings(): AppSettings {
   return {
     model: DEEPSEEK_DEFAULT_MODEL,
     thinking: true,
     reasoningEffort: 'high',
     notifications: true,
+    theme: 'system',
   };
 }

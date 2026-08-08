@@ -318,5 +318,6 @@ export function registerIpcHandlers(service: AppService): void {
   // ------------------------------------------------------------ 设置
 
   handle('settings:setKey', (_event: Electron.IpcMainInvokeEvent, key: string) => service.setApiKey(key));
+  handle('settings:get', () => service.getAppSettings());
   handle('settings:update', (_event: Electron.IpcMainInvokeEvent, partial: Record<string, unknown>) => service.updateSettings(partial as never));
 }

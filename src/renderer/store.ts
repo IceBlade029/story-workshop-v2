@@ -6,6 +6,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { getApi } from './api';
+import { applyTheme } from './theme';
 import { confirmDiscardDialog } from './components/ui/dialog';
 import type { ProjectState, RunStreamEvent, NodeContent, OutputInfo, ContextInspection, NodeVersion, FileDiff, RunSummaryEntry, OutputVersion, ExportBookResult, GlobalSearchResult } from '../shared/ipc-types';
 import type { AppSettings } from '../shared/llm-types';
@@ -1174,11 +1175,14 @@ export const store = {
     setState({ project });
   },
 
-  /** 更新全局设置（模型 / 思考模式 / 思考强度，DeepSeek V4）。 */
+  /** 更新全局设置（模型 / 思考模式 / 思考强度 / 主题，DeepSeek V4）。 */
   async updateSettings(partial: Partial<AppSettings>): Promise<void> {
     const api = getApi();
     const project = await api.settings.update(partial);
-    setState({ project });
+    // 主题即时应用（项目屏无 project 也能换主题：settings 是全局的）
+    if (partial.theme) applyTheme(partial.theme);
+    // 无项目打开时返回 null：只同步设置，不破坏状态
+    setState(project ? { project } : {});
   },
 
   // ------------------------------------------------------------ 派生
