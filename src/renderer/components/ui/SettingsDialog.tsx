@@ -5,6 +5,8 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { store, useStore } from '../../store';
+import { getApi } from '../../api';
+import { selectDialog } from './dialog';
 import { THEMES } from '../../theme';
 import { MAX_OUTPUT_TOKEN_OPTIONS } from '../../../shared/llm-types';
 import type { AppSettings, OutputStyle, ThemeId } from '../../../shared/llm-types';
@@ -21,6 +23,46 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
     try {
       await store.updateSettings(partial);
       store.showToast('设置已保存', 'success');
+    } catch (err) {
+      store.showToast((err as Error).message, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
+   * 更改项目存储位置：选目录 → 二选一（移动现有项目 / 仅切换）。
+   * 当前打开的项目被搬走时主进程会自动重开（reopened=true）。
+   */
+  const changeProjectsDir = async (): Promise<void> => {
+    if (saving) return;
+    const api = getApi();
+    const dir = await api.settings.pickProjectsDir();
+    if (!dir) return;
+    const current = settings?.projectsDir || '';
+    if (current === dir) {
+      store.showToast('已在该位置', 'info');
+      return;
+    }
+    const choice = await selectDialog({
+      title: '更改项目存储位置',
+      message: `新位置：${dir}\n\n旧位置的项目怎么处理？`,
+      options: [
+        { value: 'migrate', label: '移动现有项目（拷贝到新位置后删除旧目录）' },
+        { value: 'switch', label: '仅切换（旧项目留在原地，仍可「打开文件夹…」打开）' },
+      ],
+      confirmText: '确定',
+      cancelText: '取消',
+    });
+    if (!choice) return;
+    setSaving(true);
+    try {
+      const result = await store.changeProjectsDir(dir, choice === 'migrate');
+      if (choice === 'migrate') {
+        store.showToast(`已移动 ${result.movedCount} 个项目到新位置${result.reopened ? '，当前项目已在新位置打开' : ''}`, 'success');
+      } else {
+        store.showToast('项目存储位置已更改', 'success');
+      }
     } catch (err) {
       store.showToast((err as Error).message, 'error');
     } finally {
@@ -50,6 +92,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.Reac
               >
                 保存
               </button>
+            </div>
+
+            <div className="ws-head" style={{ marginTop: 8 }}><h3>存储</h3></div>
+            <p className="muted small">项目以文件夹形式保存在磁盘上；可自定义存储位置（更换后旧项目不会丢失）。</p>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <code className="path-display" title={settings?.projectsDir || '默认位置'}>
+                {settings?.projectsDir || '默认位置（应用数据目录 \\projects）'}
+              </code>
+              <button className="small-btn" disabled={saving} onClick={() => void changeProjectsDir()}>更改…</button>
             </div>
 
             <div className="ws-head" style={{ marginTop: 8 }}><h3>外观</h3></div>

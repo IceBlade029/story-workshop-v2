@@ -42,7 +42,7 @@ function makeProjectState(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' },
   };
 }
 
@@ -110,7 +110,19 @@ function makeApi(): RendererApi {
       edit: vi.fn(async () => project),
     },
     context: {
-      inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 30000, estimatedTokens: 50, compressed: false, keptRawCount: 2, blocked: false })),
+      inspect: vi.fn(async () => ({
+        messageCount: 2,
+        budgetTokens: 900000,
+        usedTokens: 202300,
+        estimatedTokens: 202300,
+        measurement: 'server-anchored' as const,
+        providerTokens: 200000,
+        trailingEstimatedTokens: 2300,
+        anchorMessageId: 'm-ai',
+        compressed: false,
+        keptRawCount: 2,
+        blocked: false,
+      })),
       recompress: vi.fn(async () => project),
     },
     search: {
@@ -141,6 +153,8 @@ function makeApi(): RendererApi {
       setKey: vi.fn(async () => project),
       get: vi.fn(async () => project.settings),
       update: vi.fn(async () => project),
+      pickProjectsDir: vi.fn(async () => null),
+      setProjectsDir: vi.fn(async () => ({ movedCount: 0, reopened: false })),
     },
   };
 }
@@ -308,6 +322,29 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
     expect(screen.queryByText(/运行开始（|运行结束（/)).toBeNull();
     // 用户反馈 9：AI 回答没有编辑按钮（仅用户消息可编辑）
     expect(screen.getAllByText('✎ 编辑')).toHaveLength(1);
+  });
+
+  it('上下文用量：位于右侧动作组，显示主进程用量并提供悬浮明细进度', async () => {
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const meter = screen.getByTestId('context-usage');
+    expect(meter.previousElementSibling?.classList.contains('spacer')).toBe(true);
+    const trigger = meter.querySelector('[role="progressbar"]') as HTMLElement;
+    expect(trigger.getAttribute('aria-valuenow')).toBe('202300');
+    expect(trigger.getAttribute('aria-valuemax')).toBe('900000');
+    expect(screen.getByText('已使用 22%')).toBeTruthy();
+    expect(screen.getByText('202.3k')).toBeTruthy();
+    expect(screen.getByText('/ 900k')).toBeTruthy();
+    expect(screen.getByText('服务端校准 + 新增估算')).toBeTruthy();
+    expect(screen.getByText('上次服务端 200k')).toBeTruthy();
+    expect(screen.getByText('新增估算 +2.3k')).toBeTruthy();
+    expect(meter.querySelector('.context-usage-fill')).toBeTruthy();
+    expect(meter.querySelector('[role="tooltip"]')).toBeTruthy();
   });
 
   it('对话发送后流式 chunk 渲染，无白屏', async () => {

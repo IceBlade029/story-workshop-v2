@@ -12,6 +12,7 @@ import { MarkdownView } from './ui/MarkdownView';
 import { DiffView } from './ui/DiffView';
 import { CallInspectionDialog } from './ui/CallInspectionDialog';
 import type { ChatMessage, Attachment } from '../../shared/types';
+import type { ContextInspection } from '../../shared/ipc-types';
 import { assetTypeLabel } from '../../shared/types';
 
 // --------------------------------------------------------------------------- 附件行
@@ -610,11 +611,139 @@ function AttachmentPicker({ onClose }: { onClose: () => void }): React.ReactElem
   );
 }
 
+// --------------------------------------------------------------------------- 上下文用量
+
+/** 紧凑 token 数值：202300 → 202.3k，900000 → 900k。 */
+export function formatTokenCount(value: number): string {
+  const safe = Math.max(0, Math.round(value));
+  if (safe >= 1_000_000) {
+    const scaled = safe / 1_000_000;
+    return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}m`;
+  }
+  if (safe >= 1_000) {
+    const scaled = safe / 1_000;
+    return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}k`;
+  }
+  return safe.toLocaleString('zh-CN');
+}
+
+/**
+ * 输入工具栏的上下文用量组件。
+ * 数据来自主进程 context.inspect，避免渲染层重复硬编码预算或字符换算。
+ */
+export function ContextUsageMeter(): React.ReactElement {
+  const project = useStore((s) => s.project);
+  const activePath = useStore((s) => s.activePath);
+  const [inspection, setInspection] = React.useState<ContextInspection | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [failed, setFailed] = React.useState(false);
+  const requestSequence = useRef(0);
+  const tooltipId = React.useId();
+
+  const refresh = React.useCallback(async (): Promise<void> => {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    try {
+      const next = await store.inspectContext();
+      if (sequence !== requestSequence.current) return;
+      setInspection(next);
+      setFailed(false);
+    } catch {
+      if (sequence !== requestSequence.current) return;
+      setFailed(true);
+    } finally {
+      if (sequence === requestSequence.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    return () => { requestSequence.current += 1; };
+  }, [
+    refresh,
+    project?.dir,
+    project?.activeSessionId,
+    project?.activeMessageId,
+    project?.attachments.length,
+    activePath,
+  ]);
+
+  const used = inspection?.usedTokens ?? 0;
+  const limit = inspection?.budgetTokens ?? 0;
+  const exactPercent = limit > 0 ? (used / limit) * 100 : 0;
+  const displayPercent = Math.max(0, Math.round(exactPercent));
+  const barPercent = Math.min(100, Math.max(0, exactPercent));
+  const warning = exactPercent >= 85;
+  const unavailable = failed && inspection === null;
+  const statusText = unavailable ? '用量暂不可用' : loading && inspection === null ? '正在读取用量' : `已使用 ${displayPercent}%`;
+
+  return (
+    <div
+      className={`context-usage${warning ? ' context-usage-warn' : ''}`}
+      onPointerEnter={() => { if (!loading) void refresh(); }}
+      data-testid="context-usage"
+    >
+      <div
+        className="context-usage-trigger"
+        role="progressbar"
+        tabIndex={0}
+        aria-label={statusText}
+        aria-describedby={tooltipId}
+        aria-valuemin={inspection ? 0 : undefined}
+        aria-valuemax={inspection ? limit : undefined}
+        aria-valuenow={inspection ? used : undefined}
+        onFocus={() => { if (!loading) void refresh(); }}
+      >
+        <span className="context-usage-label">{unavailable ? '已使用 --' : loading && inspection === null ? '读取中…' : `已使用 ${displayPercent}%`}</span>
+        <span className="context-usage-mini-track" aria-hidden="true">
+          <span className="context-usage-fill" style={{ width: `${barPercent}%` }} />
+        </span>
+      </div>
+      <div id={tooltipId} className="context-usage-popover" role="tooltip" aria-live="polite">
+        <div className="context-usage-popover-head">
+          <strong>上下文用量</strong>
+          {inspection?.compressed && <span className="context-usage-badge">已压缩</span>}
+        </div>
+        {inspection ? (
+          <>
+            <div className="context-usage-value">
+              <span>{formatTokenCount(used)}</span>
+              <span className="context-usage-limit"> / {formatTokenCount(limit)}</span>
+            </div>
+            <div className="context-usage-detail-track" role="presentation">
+              <span className="context-usage-fill" style={{ width: `${barPercent}%` }} />
+            </div>
+            <div className="context-usage-meta">
+              <span>{exactPercent.toFixed(1)}%</span>
+              <span>{inspection.measurement === 'server-anchored' ? '服务端校准 + 新增估算' : '当前活动话题 · 全量估算'}</span>
+            </div>
+            {inspection.measurement === 'server-anchored' && (
+              <div className="context-usage-meta">
+                <span>上次服务端 {formatTokenCount(inspection.providerTokens ?? 0)}</span>
+                <span>新增估算 +{formatTokenCount(inspection.trailingEstimatedTokens ?? 0)}</span>
+              </div>
+            )}
+            {inspection.measurement === 'server-anchored' && (inspection.transientEstimatedTokens ?? 0) > 0 && (
+              <div className="context-usage-meta">
+                <span>临时工具上下文</span>
+                <span>估算扣除 -{formatTokenCount(inspection.transientEstimatedTokens ?? 0)}</span>
+              </div>
+            )}
+            {inspection.blocked && <div className="context-usage-alert">自动压缩已暂停</div>}
+            {failed && <div className="context-usage-alert">刷新失败，显示上次结果</div>}
+          </>
+        ) : (
+          <div className="context-usage-empty">{failed ? '用量暂不可用' : '正在读取上下文用量…'}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function InputBar(): React.ReactElement {
   const inputText = useStore((s) => s.inputText);
   const running = useStore((s) => s.activeRun?.status === 'running');
   const project = useStore((s) => s.project);
-  const activePath = useStore((s) => s.activePath);
   // 回答详略档位（每次发送可选，localStorage 记忆）
   const answerDetail = useStore((s) => s.answerDetail);
   // 归档会话完全只读（ux-review §4.5）：不显示输入区
@@ -635,10 +764,6 @@ function InputBar(): React.ReactElement {
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(160, Math.max(64, ta.scrollHeight))}px`;
   }, [inputText]);
-
-  // §4.1：token/上下文「已使用 X%」轻进度（字符估算，与主进程 budget 同口径 ≈1.5 字/token）
-  const chars = activePath.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
-  const tokenPct = Math.min(100, Math.round((chars / 1.5 / 30000) * 100));
 
   const send = (): void => {
     if (running) return;
@@ -690,10 +815,8 @@ function InputBar(): React.ReactElement {
           <option value="auto">自动</option>
           <option value="detailed">详细</option>
         </select>
-        <span className={`muted small token-meter${tokenPct >= 85 ? ' token-meter-warn' : ''}`} title="已使用上下文估算进度">
-          已使用 {tokenPct}%
-        </span>
         <span className="spacer" />
+        <ContextUsageMeter />
         <span className="attachment-btn-wrap">
           <button className="small-btn" onClick={() => setPickerOpen(!pickerOpen)} title="上传文件或添加项目文件为附件（§3.1）">
             📎 附件

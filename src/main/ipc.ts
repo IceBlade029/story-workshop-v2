@@ -10,6 +10,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AppService } from './app-service';
+import { getSettings } from './settings-store';
 import type { RunStartRequest } from '../shared/ipc-types';
 
 const RUN_EVENT_CHANNEL = 'run:event';
@@ -44,9 +45,13 @@ export function registerIpcHandlers(service: AppService): void {
     }
   };
 
+  /**
+   * 项目存储根目录：优先读全局设置 projectsDir（用户可自定），
+   * 未设置时回退默认 userData/projects。
+   */
   const getProjectsDir = (): string => {
-    const dir = path.join(app.getPath('userData'), 'projects');
     const fs = require('fs') as typeof import('fs');
+    const dir = getSettings().projectsDir || path.join(app.getPath('userData'), 'projects');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     return dir;
   };
@@ -320,4 +325,16 @@ export function registerIpcHandlers(service: AppService): void {
   handle('settings:setKey', (_event: Electron.IpcMainInvokeEvent, key: string) => service.setApiKey(key));
   handle('settings:get', () => service.getAppSettings());
   handle('settings:update', (_event: Electron.IpcMainInvokeEvent, partial: Record<string, unknown>) => service.updateSettings(partial as never));
+
+  // 项目存储位置（§6.10 修订）：选择文件夹 + 切换/迁移
+  handle('settings:pickProjectsDir', async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win!, {
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
+
+  handle('settings:setProjectsDir', (_event: Electron.IpcMainInvokeEvent, dir: string, migrate: boolean) =>
+    service.setProjectsDir(getProjectsDir(), dir, migrate));
 }

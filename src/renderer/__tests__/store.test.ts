@@ -59,7 +59,7 @@ function makeProject(overrides: Partial<ProjectState> = {}): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' },
     ...overrides,
   };
 }
@@ -122,7 +122,7 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       edit: vi.fn(async () => project),
     },
     context: {
-      inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 30000, estimatedTokens: 50, compressed: false, keptRawCount: 2, blocked: false })),
+      inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 900000, usedTokens: 202300, estimatedTokens: 202300, measurement: 'estimated' as const, compressed: false, keptRawCount: 2, blocked: false })),
       recompress: vi.fn(async () => project),
     },
     nodeVersion: {
@@ -144,7 +144,13 @@ function makeApi(overrides: Partial<RendererApi> = {}): RendererApi {
       accept: vi.fn(async () => project),
       rollback: vi.fn(async () => project),
     },
-    settings: { setKey: vi.fn(async () => project), get: vi.fn(async () => project.settings), update: vi.fn(async () => project) },
+    settings: {
+      setKey: vi.fn(async () => project),
+      get: vi.fn(async () => project.settings),
+      update: vi.fn(async () => project),
+      pickProjectsDir: vi.fn(async () => null),
+      setProjectsDir: vi.fn(async () => ({ movedCount: 0, reopened: false })),
+    },
   };
   return { ...stub, ...overrides } as RendererApi;
 }

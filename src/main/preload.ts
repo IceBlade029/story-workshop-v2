@@ -117,5 +117,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setKey: (key: string) => ipcRenderer.invoke('settings:setKey', key),
     get: () => ipcRenderer.invoke('settings:get'),
     update: (partial: Partial<import('../shared/llm-types').AppSettings>) => ipcRenderer.invoke('settings:update', partial),
+    pickProjectsDir: () => ipcRenderer.invoke('settings:pickProjectsDir'),
+    setProjectsDir: (dir: string, migrate: boolean) => ipcRenderer.invoke('settings:setProjectsDir', dir, migrate),
   },
 } satisfies RendererApi);

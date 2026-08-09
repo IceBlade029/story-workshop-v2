@@ -86,6 +86,17 @@ export interface ChatMessage {
   timestamp: string;
   /** 关联的 agent run */
   runId?: string;
+  /**
+   * 本条 AI 回复完成时的服务端 token 快照。
+   * inputFingerprint 用于确认快照对应的输入前缀仍与当前活动分支一致；
+   * transientEstimatedTokens 是工具循环中不会持久化到后续会话的临时上下文估算。
+   */
+  contextUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    inputFingerprint: string;
+    transientEstimatedTokens?: number;
+  };
   /** 流式/取消/工具调用记录 */
   toolTrace?: ToolCallTrace[];
   /**

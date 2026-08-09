@@ -26,6 +26,7 @@ import { validateToolArgs } from './args-validate';
 import { generateId } from '../storage/id';
 import type { ProjectWorkspace } from '../storage/workspace';
 import type { ChatMessage, ChangeItem, TaskKind, ToolCallTrace } from '../../shared/types';
+import { contextInputFingerprint, estimateCharCount } from './context-compression';
 
 export const DEFAULT_MAX_TURNS = 25;
 
@@ -205,6 +206,7 @@ export class RunCoordinator {
     let turns = 0;
     let finalTruncated = false;
     const usage = { inputTokens: 0, outputTokens: 0 };
+    let lastTurnUsage: { inputTokens: number; outputTokens: number } | undefined;
     // 工具调用序列（含耗时，进调用详情 §4.7）
     const toolDurations: Array<{ name: string; args: unknown; status: string; error?: string; durationMs: number }> = [];
     // 思维链累积（ux-review §4.1：随 AI 消息持久化，UI 折叠展示）
@@ -267,6 +269,7 @@ export class RunCoordinator {
       }
       usage.inputTokens += turn.usage.inputTokens;
       usage.outputTokens += turn.usage.outputTokens;
+      lastTurnUsage = { inputTokens: turn.usage.inputTokens, outputTokens: turn.usage.outputTokens };
 
       if (turn.type === 'final') {
         finalAnswer = turn.answer;
@@ -408,6 +411,19 @@ export class RunCoordinator {
         content: finalAnswer,
         timestamp: now(),
         runId,
+        ...(lastTurnUsage && lastTurnUsage.inputTokens + lastTurnUsage.outputTokens > 0
+          ? {
+              contextUsage: {
+                ...lastTurnUsage,
+                inputFingerprint: contextInputFingerprint(request.messages),
+                // 工具轮上下文只存在于本次 run，不会作为历史消息进入下一次调用。
+                // 从服务端快照中扣除其本地估算，避免工具结果越多，用量表反而越虚高。
+                ...(turnContext.length > 0
+                  ? { transientEstimatedTokens: estimateCharCount(JSON.stringify(turnContext).length) }
+                  : {}),
+              },
+            }
+          : {}),
         parentId: request.parentMessageId,
         ...(request.supersedesMessageId ? { supersedesId: request.supersedesMessageId } : {}),
         toolTrace: traces.length > 0 ? traces : undefined,

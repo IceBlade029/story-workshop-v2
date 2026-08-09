@@ -115,7 +115,20 @@ export interface TrashEntry {
 export interface ContextInspection {
   messageCount: number;
   budgetTokens: number;
+  /** 当前下一次调用实际组装后的估算用量；有摘要时只计算摘要 + 保留原文 */
+  usedTokens: number;
+  /** 压缩前完整活动路径的估算量（诊断用，不直接作为进度条用量） */
   estimatedTokens: number;
+  /** 用量来源：服务端快照校准，或无有效锚点时的全量本地估算 */
+  measurement: 'server-anchored' | 'estimated';
+  /** 最近一个有效服务端快照的原始 token 总量 */
+  providerTokens?: number;
+  /** 服务端锚点之后新增消息的本地估算量 */
+  trailingEstimatedTokens?: number;
+  /** 上次工具循环中未持久化到下一轮历史的临时上下文估算扣除量 */
+  transientEstimatedTokens?: number;
+  /** 提供服务端锚点的 AI 消息 id */
+  anchorMessageId?: string;
   /** 本次组装是否使用压缩摘要 */
   compressed: boolean;
   /** 保留原文的消息条数（最近几轮，§7.3） */
@@ -362,5 +375,9 @@ export interface RendererApi {
     /** 更新全局设置（模型 / 思考模式 / 思考强度 / 主题，DeepSeek V4）。
      * 无项目打开时返回 null（设置是全局的，与项目无关）。 */
     update(partial: Partial<AppSettings>): Promise<ProjectState | null>;
+    /** 文件夹选择对话框 → 新的项目存储位置；取消返回 null */
+    pickProjectsDir(): Promise<string | null>;
+    /** 更改项目存储位置（migrate=true 时把旧位置项目全部搬过去；当前项目被搬走自动重开） */
+    setProjectsDir(dir: string, migrate: boolean): Promise<{ movedCount: number; reopened: boolean }>;
   };
 }

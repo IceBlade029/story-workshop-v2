@@ -9,7 +9,7 @@ import React from 'react';
 import { DialogHost, confirmDialog, promptDialog } from '../components/ui/dialog';
 import { MarkdownView, countMarkers, highlightMarkers } from '../components/ui/MarkdownView';
 import { DiffView } from '../components/ui/DiffView';
-import { OrganizeChangesExpand } from '../components/ConversationPane';
+import { OrganizeChangesExpand, formatTokenCount } from '../components/ConversationPane';
 import { store } from '../store';
 import { setApiForTest } from '../api';
 import type { FileDiff, RendererApi } from '../../shared/ipc-types';
@@ -77,6 +77,16 @@ describe('Dialog 服务（替换 confirm/prompt）', () => {
       await promise;
     });
     expect(await promise).toBe(false);
+  });
+});
+
+describe('上下文用量格式化', () => {
+  it('按紧凑单位显示悬浮面板中的已用量与上限', () => {
+    expect(formatTokenCount(0)).toBe('0');
+    expect(formatTokenCount(999)).toBe('999');
+    expect(formatTokenCount(202_300)).toBe('202.3k');
+    expect(formatTokenCount(900_000)).toBe('900k');
+    expect(formatTokenCount(1_200_000)).toBe('1.2m');
   });
 });
 

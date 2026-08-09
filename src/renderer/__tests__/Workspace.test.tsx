@@ -33,7 +33,7 @@ function makeProject(): ProjectState {
     runSummaries: [],
     hasApiKey: false,
     trash: [],
-    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 },
+    settings: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' },
   };
 }
 
@@ -74,7 +74,7 @@ function makeApi(): RendererApi {
       unarchiveSession: vi.fn(async () => project), deleteSession: vi.fn(async () => project),
       switchBranch: vi.fn(async () => project), edit: vi.fn(async () => project),
     },
-    context: { inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 30000, estimatedTokens: 50, compressed: false, keptRawCount: 2, blocked: false })), recompress: vi.fn(async () => project) },
+    context: { inspect: vi.fn(async () => ({ messageCount: 2, budgetTokens: 900000, usedTokens: 202300, estimatedTokens: 202300, measurement: 'estimated' as const, compressed: false, keptRawCount: 2, blocked: false })), recompress: vi.fn(async () => project) },
     search: { global: vi.fn(async () => []) },
     nodeVersion: { list: vi.fn(async () => []), read: vi.fn(async () => '') },
     trash: { restore: vi.fn(async () => project), purge: vi.fn(async () => project) },
@@ -84,7 +84,7 @@ function makeApi(): RendererApi {
       revise: vi.fn(async () => ({ runId: 'r' })), list: vi.fn(async () => []), inspect: vi.fn(async () => null),
       diff: vi.fn(async () => []), accept: vi.fn(async () => project), rollback: vi.fn(async () => project),
     },
-    settings: { setKey: vi.fn(async () => project), get: vi.fn(async () => project.settings), update: vi.fn(async () => project) },
+    settings: { setKey: vi.fn(async () => project), get: vi.fn(async () => project.settings), update: vi.fn(async () => project), pickProjectsDir: vi.fn(async () => null), setProjectsDir: vi.fn(async () => ({ movedCount: 0, reopened: false })) },
   };
 }
 

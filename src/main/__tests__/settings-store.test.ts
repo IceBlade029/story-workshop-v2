@@ -29,16 +29,16 @@ afterAll(() => {
 });
 
 describe('settings-store', () => {
-  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开 · 主题跟随系统 · DeepSeek 输出风格 · 16384 输出上限）', () => {
+  it('无配置文件 → 返回默认（v4-flash · 思考开启 · effort high · 通知开 · 主题跟随系统 · DeepSeek 输出风格 · 16384 输出上限 · 默认项目目录）', () => {
     const s = getSettings();
-    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
+    expect(s).toEqual({ model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' });
   });
 
   it('保存并读回；非法值回退默认', () => {
     saveSettings({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max' });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'max', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' });
 
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe', theme: 'rainbow', outputStyle: 'fancy', maxOutputTokens: 99999 }), 'utf-8');
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ model: 'unknown-model', thinking: 'yes', reasoningEffort: 'insane', notifications: 'maybe', theme: 'rainbow', outputStyle: 'fancy', maxOutputTokens: 99999, projectsDir: 'relative/path' }), 'utf-8');
     const s = getSettings();
     expect(s.model).toBe('deepseek-v4-flash');
     expect(s.thinking).toBe(true);
@@ -47,12 +47,13 @@ describe('settings-store', () => {
     expect(s.theme).toBe('system');
     expect(s.outputStyle).toBe('deepseek');
     expect(s.maxOutputTokens).toBe(16384);
+    expect(s.projectsDir).toBe('');
   });
 
   it('部分更新保留其余字段', () => {
     saveSettings({ model: 'deepseek-v4-pro' });
     saveSettings({ thinking: false });
-    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384 });
+    expect(getSettings()).toEqual({ model: 'deepseek-v4-pro', thinking: false, reasoningEffort: 'high', notifications: true, theme: 'system', outputStyle: 'deepseek', maxOutputTokens: 16384, projectsDir: '' });
   });
 
   it('主题：保存并读回；非法值写不进去', () => {
@@ -78,5 +79,24 @@ describe('settings-store', () => {
   it('损坏文件 → 回退默认', () => {
     fs.writeFileSync(SETTINGS_FILE, 'not json', 'utf-8');
     expect(getSettings().model).toBe('deepseek-v4-flash');
+  });
+
+  it('项目存储目录：绝对路径保存并读回；相对路径/空值不入库', () => {
+    const p = path.join(os.tmpdir(), 'sw2-my-projects');
+    const next = saveSettings({ projectsDir: p });
+    expect(next.projectsDir).toBe(p);
+    expect(getSettings().projectsDir).toBe(p);
+    // 相对路径 → 保留当前值（不入库）
+    const bad = saveSettings({ projectsDir: 'my-projects' });
+    expect(bad.projectsDir).toBe(p);
+    expect(getSettings().projectsDir).toBe(p);
+    // 空字符串 → 保留当前值（回默认由 getSettings 的白名单回退处理）
+    const empty = saveSettings({ projectsDir: '' });
+    expect(empty.projectsDir).toBe(p);
+  });
+
+  it('项目存储目录：文件里写相对路径 → 回退默认空字符串', () => {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ projectsDir: 'relative/path' }), 'utf-8');
+    expect(getSettings().projectsDir).toBe('');
   });
 });

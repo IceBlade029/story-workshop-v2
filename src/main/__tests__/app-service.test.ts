@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { AppService } from '../app-service';
+import { ProjectWorkspace } from '../storage/workspace';
 import { configureSettingsDir, getSettings, saveSettings } from '../settings-store';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import { makeTempDir, removeDir } from './helpers/temp-project';
@@ -766,5 +767,108 @@ describe('app-service — 设置（全局设置与项目解耦）', () => {
       expect(prompt).toContain('回答充分性');
       expect(prompt).not.toContain('本次回答要求');
     }
+  });
+
+  it('setProjectsDir：migrate=true 迁移全部项目到新位置（旧目录删除，重名顺延），设置落盘', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    const root = makeTempDir();
+    tempDirs.push(root);
+    const oldBase = path.join(root, 'old-projects');
+    const newBase = path.join(root, 'new-projects');
+    fs.mkdirSync(oldBase, { recursive: true });
+    ProjectWorkspace.create(path.join(oldBase, '甲'), '项目甲');
+    ProjectWorkspace.create(path.join(oldBase, '乙'), '项目乙');
+    fs.mkdirSync(path.join(newBase, '甲'), { recursive: true }); // 预置同名目录 → 新项目应顺延为「甲-2」
+
+    const result = service.setProjectsDir(oldBase, newBase, true);
+
+    expect(result.movedCount).toBe(2);
+    expect(result.reopened).toBe(false);
+    expect(getSettings().projectsDir).toBe(newBase);
+    // 新位置：预置的「甲」空目录保留，迁移副本顺延为「甲-2」，乙直接复制
+    expect(fs.existsSync(path.join(newBase, '甲'))).toBe(true); // 预置目录保留
+    expect(fs.existsSync(path.join(newBase, '甲', 'project.json'))).toBe(false); // 预置为空目录，未写入
+    expect(fs.existsSync(path.join(newBase, '甲-2', 'project.json'))).toBe(true);
+    expect(fs.existsSync(path.join(newBase, '乙', 'project.json'))).toBe(true);
+    // 旧位置项目目录已删除（拷贝全部成功后）
+    expect(fs.existsSync(path.join(oldBase, '甲'))).toBe(false);
+    expect(fs.existsSync(path.join(oldBase, '乙'))).toBe(false);
+    // 新位置的项目可被列出
+    expect(AppService.listProjects(newBase).map((p) => p.name).sort()).toEqual(['项目乙', '项目甲'].sort());
+  });
+
+  it('setProjectsDir：migrate=false 仅切换，旧项目留在原地', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    const root = makeTempDir();
+    tempDirs.push(root);
+    const oldBase = path.join(root, 'old-projects');
+    const newBase = path.join(root, 'new-projects');
+    fs.mkdirSync(oldBase, { recursive: true });
+    ProjectWorkspace.create(path.join(oldBase, '甲'), '项目甲');
+
+    const result = service.setProjectsDir(oldBase, newBase, false);
+
+    expect(result.movedCount).toBe(0);
+    expect(getSettings().projectsDir).toBe(newBase);
+    expect(fs.existsSync(path.join(oldBase, '甲', 'project.json'))).toBe(true);
+    expect(fs.existsSync(path.join(newBase, '甲'))).toBe(false);
+  });
+
+  it('setProjectsDir：当前打开的项目被搬走 → 自动从新路径重开（reopened=true）', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    const root = makeTempDir();
+    tempDirs.push(root);
+    const oldBase = path.join(root, 'old-projects');
+    const newBase = path.join(root, 'new-projects');
+    fs.mkdirSync(oldBase, { recursive: true });
+    const projDir = path.join(oldBase, '甲');
+    service.createProject(projDir, '项目甲');
+    expect(service.dir).toBe(projDir);
+
+    const result = service.setProjectsDir(oldBase, newBase, true);
+
+    expect(result.movedCount).toBe(1);
+    expect(result.reopened).toBe(true);
+    expect(service.dir).toBe(path.join(newBase, '甲'));
+    expect(service.getState().name).toBe('项目甲');
+  });
+
+  it('setProjectsDir：相对路径被拒绝；新旧位置相同拒绝迁移', () => {
+    const service = new AppService(() => new ScriptedModelAdapter([]));
+    const root = makeTempDir();
+    tempDirs.push(root);
+    const oldBase = path.join(root, 'old-projects');
+    fs.mkdirSync(oldBase, { recursive: true });
+    ProjectWorkspace.create(path.join(oldBase, '甲'), '项目甲');
+    expect(() => service.setProjectsDir(oldBase, 'relative', true)).toThrow('INVALID_PROJECTS_DIR');
+    expect(() => service.setProjectsDir(oldBase, oldBase, true)).toThrow('SAME_PROJECTS_DIR');
+  });
+
+  it('setProjectsDir：run 进行中拒绝迁移（RUN_IN_PROGRESS 守卫）', async () => {
+    const root = makeTempDir();
+    tempDirs.push(root);
+    let releaseGate = (): void => {};
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const blockingModel: ModelAdapter = {
+      provider: 'blocking',
+      async runTurn(): Promise<ModelTurn> {
+        await gate;
+        return { type: 'final', answer: '完成', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const service = new AppService(() => blockingModel);
+    const oldBase = path.join(root, 'old');
+    const newBase = path.join(root, 'new');
+    fs.mkdirSync(oldBase, { recursive: true });
+    service.createProject(path.join(oldBase, 'proj'), '测试项目');
+    service.sendMessage('hi');
+    const running = service.run({ kind: 'chat' });
+
+    expect(() => service.setProjectsDir(oldBase, newBase, true)).toThrow('RUN_IN_PROGRESS');
+    // 释放 → run 正常完成，守卫复位后迁移可行
+    releaseGate();
+    await running;
+    const result = service.setProjectsDir(oldBase, newBase, true);
+    expect(result.movedCount).toBe(1);
   });
 });

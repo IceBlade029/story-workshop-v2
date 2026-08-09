@@ -19,6 +19,7 @@
  * 禁止把残缺摘要标记为成功。
  */
 import type { ChatMessage, RunRecord } from '../../shared/types';
+import { createHash } from 'crypto';
 import type { ProjectWorkspace } from '../storage/workspace';
 import type { ModelAdapter } from './model-types';
 import { persistRunRecord } from './run-recorder';
@@ -46,7 +47,7 @@ export function estimateCharCount(chars: number): number {
   return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
-function messageTokens(m: ChatMessage): number {
+export function estimateMessageTokens(m: ChatMessage): number {
   let chars = m.content.length;
   if (m.toolTrace) chars += JSON.stringify(m.toolTrace).length;
   if (m.refs) chars += JSON.stringify(m.refs).length;
@@ -55,7 +56,30 @@ function messageTokens(m: ChatMessage): number {
 
 /** 估算一条对话路径的总输入（含固定开销）。 */
 export function estimatePathTokens(path: ChatMessage[]): number {
-  return OVERHEAD_TOKENS + path.reduce((sum, m) => sum + messageTokens(m), 0);
+  return OVERHEAD_TOKENS + path.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+}
+
+/** 不重复计入固定 system/tools 开销，用于估算服务端锚点后的新增尾部。 */
+export function estimateTrailingTokens(path: ChatMessage[]): number {
+  return path.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
+}
+
+/**
+ * 对一次模型输入中的持久化消息做稳定指纹。
+ * 不包含 timestamp/派生树字段，避免同一摘要在只读重组时因时间戳变化失效。
+ */
+export function contextInputFingerprint(path: ChatMessage[]): string {
+  const hash = createHash('sha256');
+  for (const message of path) {
+    hash.update(JSON.stringify({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      refs: message.refs ?? null,
+    }));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
 }
 
 export interface CompressionPlan {

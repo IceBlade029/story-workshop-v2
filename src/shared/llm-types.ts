@@ -36,6 +36,8 @@ export interface AppSettings {
   notifications: boolean;
   /** 界面主题（缺省跟随系统；设置存 settings.json，首帧镜像存 localStorage） */
   theme: ThemeId;
+  /** 项目存储目录（空字符串 = 默认 userData/projects） */
+  projectsDir: string;
   /** 对话回答渲染样式（默认 DeepSeek 风格：彩色标题/加粗/代码高亮） */
   outputStyle: OutputStyle;
   /** 单次模型调用最大输出 tokens（长文评价被截断时可调大） */
@@ -198,5 +200,6 @@ export function defaultSettings(): AppSettings {
     theme: 'system',
     outputStyle: 'deepseek',
     maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    projectsDir: '',
   };
 }

@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import { AppService } from '../app-service';
 import { ScriptedModelAdapter, type ScriptedTurn } from '../agent-runtime/scripted-model-adapter';
 import type { ModelAdapter, ModelTurnInput, ModelTurn } from '../agent-runtime/model-types';
-import { CONTEXT_BUDGET_TOKENS, MAX_OUTPUT_TOKENS, estimatePathTokens } from '../agent-runtime/context-compression';
+import { CONTEXT_BUDGET_TOKENS, MAX_OUTPUT_TOKENS, estimatePathTokens, estimateTrailingTokens, summaryMessage } from '../agent-runtime/context-compression';
 import { makeTempDir, removeDir } from './helpers/temp-project';
 
 vi.mock('../api-key-store', () => ({
@@ -190,6 +190,75 @@ describe('M6 — 两阶段压缩接入（§7.2、§7.3、§7.4）', () => {
     expect(inspection.messageCount).toBe(path.length);
     expect(inspection.budgetTokens).toBe(CONTEXT_BUDGET_TOKENS);
     expect(inspection.estimatedTokens).toBeGreaterThan(headroom());
+    expect(inspection.usedTokens).toBeLessThan(inspection.estimatedTokens);
+    expect(inspection.usedTokens).toBe(estimatePathTokens([
+      summaryMessage(anchor, '已有摘要'),
+      ...path.slice(path.length - 6),
+    ]));
+    expect(inspection.measurement).toBe('estimated');
+  });
+
+  it('上下文用量：使用最近 AI 回复的服务端 usage，并只估算其后的新增尾部', async () => {
+    const { service } = makeService([
+      { type: 'final', answer: '服务端校准回答', usage: usage(120, 30) },
+      { type: 'final', answer: '会话标题', usage: usage(10, 3) },
+    ]);
+    service.sendMessage('问题');
+    await service.run({ kind: 'chat' });
+    service.sendMessage('尚未提交给模型的后续问题');
+
+    const activePath = service.workspace.conversation.readActivePath();
+    const aiIndex = activePath.findIndex((m) => m.role === 'ai');
+    const ai = activePath[aiIndex];
+    const inspection = service.inspectContext();
+
+    expect(ai.contextUsage).toMatchObject({ inputTokens: 120, outputTokens: 30 });
+    expect(inspection.measurement).toBe('server-anchored');
+    expect(inspection.providerTokens).toBe(150);
+    expect(inspection.anchorMessageId).toBe(ai.id);
+    expect(inspection.trailingEstimatedTokens).toBe(estimateTrailingTokens(activePath.slice(aiIndex + 1)));
+    expect(inspection.usedTokens).toBe(150 + inspection.trailingEstimatedTokens!);
+  });
+
+  it('上下文用量：扣除不会进入下一轮历史的工具循环临时上下文', async () => {
+    const { service } = makeService([
+      { type: 'tool_calls', toolCalls: [toolCall('t1', 'search_nodes', {})], usage: usage(80, 10) },
+      { type: 'final', answer: '工具后的回答', usage: usage(5000, 100) },
+      { type: 'final', answer: '会话标题', usage: usage(10, 3) },
+    ]);
+    service.sendMessage('请检索后回答');
+    await service.run({ kind: 'chat' });
+
+    const activePath = service.workspace.conversation.readActivePath();
+    const aiIndex = activePath.findIndex((m) => m.role === 'ai');
+    const anchor = activePath[aiIndex].contextUsage!;
+    const inspection = service.inspectContext();
+
+    expect(anchor.transientEstimatedTokens).toBeGreaterThan(0);
+    expect(inspection.measurement).toBe('server-anchored');
+    expect(inspection.transientEstimatedTokens).toBe(anchor.transientEstimatedTokens);
+    expect(inspection.usedTokens).toBe(
+      5100 - anchor.transientEstimatedTokens! + estimateTrailingTokens(activePath.slice(aiIndex + 1)),
+    );
+  });
+
+  it('上下文用量：服务端锚点指纹不匹配时安全回退全量估算', () => {
+    const { service } = makeService();
+    const conv = service.workspace.conversation;
+    conv.appendMessage({ id: 'u1', role: 'user', content: '当前问题', timestamp: 't' });
+    conv.appendMessage({
+      id: 'a1',
+      role: 'ai',
+      content: '回答',
+      timestamp: 't',
+      parentId: 'u1',
+      contextUsage: { inputTokens: 100, outputTokens: 20, inputFingerprint: '旧分支指纹' },
+    });
+
+    const inspection = service.inspectContext();
+    expect(inspection.measurement).toBe('estimated');
+    expect(inspection.providerTokens).toBeUndefined();
+    expect(inspection.usedTokens).toBe(estimatePathTokens(conv.readActivePath()));
   });
 });
 

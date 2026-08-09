@@ -33,6 +33,11 @@ function isMaxOutputTokens(v: unknown): v is number {
   return typeof v === 'number' && (MAX_OUTPUT_TOKEN_OPTIONS as readonly number[]).includes(v);
 }
 
+/** 项目存储目录：非空绝对路径才接受，否则回退默认（空字符串）。 */
+function isProjectsDir(v: unknown): v is string {
+  return typeof v === 'string' && v !== '' && path.isAbsolute(v);
+}
+
 export function getSettings(): AppSettings {
   const defaults = defaultSettings();
   try {
@@ -46,6 +51,7 @@ export function getSettings(): AppSettings {
       theme: isThemeId(raw.theme) ? raw.theme : defaults.theme,
       outputStyle: isOutputStyle(raw.outputStyle) ? raw.outputStyle : defaults.outputStyle,
       maxOutputTokens: isMaxOutputTokens(raw.maxOutputTokens) ? raw.maxOutputTokens : defaults.maxOutputTokens,
+      projectsDir: isProjectsDir(raw.projectsDir) ? raw.projectsDir : defaults.projectsDir,
     };
   } catch {
     return defaults;
@@ -61,6 +67,7 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
     theme: isThemeId(partial.theme) ? partial.theme : current.theme,
     outputStyle: isOutputStyle(partial.outputStyle) ? partial.outputStyle : current.outputStyle,
     maxOutputTokens: isMaxOutputTokens(partial.maxOutputTokens) ? partial.maxOutputTokens : current.maxOutputTokens,
+    projectsDir: isProjectsDir(partial.projectsDir) ? partial.projectsDir : current.projectsDir,
   };
   if (!fs.existsSync(settingsDir)) fs.mkdirSync(settingsDir, { recursive: true });
   // 原子写：临时文件 + rename

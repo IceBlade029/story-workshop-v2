@@ -1233,6 +1233,21 @@ export const store = {
     setState(project ? { project } : {});
   },
 
+  /**
+   * 更改项目存储位置（设置弹窗「存储」区块）：migrate=true 时主进程把旧位置
+   * 项目全部搬走；当前项目被搬走会自动重开（返回 reopened）。随后刷新列表。
+   */
+  async changeProjectsDir(dir: string, migrate: boolean): Promise<{ movedCount: number; reopened: boolean }> {
+    const api = getApi();
+    const result = await api.settings.setProjectsDir(dir, migrate);
+    await this.loadProjects();
+    if (result.reopened) {
+      const project = await api.state.get();
+      setState({ project });
+    }
+    return result;
+  },
+
   // ------------------------------------------------------------ 派生
 
   /** 活动路径消息（展示用；缓存于 state.activePath）。 */

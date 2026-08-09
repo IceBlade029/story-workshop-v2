@@ -18,6 +18,8 @@ import { acceptRun, rollbackRun, readRunSummary, readRunRecord } from './agent-r
 import { TASK_DEFINITIONS } from './agent-runtime/task-definitions';
 import {
   CONTEXT_BUDGET_TOKENS,
+  contextInputFingerprint,
+  estimateTrailingTokens,
   estimatePathTokens,
   planCompression,
   runCompressionTask,
@@ -301,6 +303,75 @@ export class AppService {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * 递归拷贝目录（逐文件 copyFileSync + mkdirSync）。
+   * 不用 fs.cpSync：Node 22 Windows 下中文路径（如项目目录名）会原生崩溃
+   * （ACCESS_VIOLATION，uv_fs_copyfile 已知问题）；copyFileSync 安全。
+   */
+  private static copyDir(src: string, dest: string): void {
+    const fs = require('fs') as typeof import('fs');
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      const s = path.join(src, entry.name);
+      const d = path.join(dest, entry.name);
+      if (entry.isDirectory()) {
+        this.copyDir(s, d);
+      } else if (entry.isFile()) {
+        fs.copyFileSync(s, d);
+      }
+    }
+  }
+
+  /**
+   * 更改项目存储目录（设置弹窗「存储」区块）：
+   * - migrate=true：把旧目录下全部项目搬到新目录——全部拷贝成功后才删除旧目录
+   *   （拷贝中途失败时旧目录保留，数据零丢失；重名自动加 -2 后缀）。
+   * - migrate=false：仅切换位置，旧项目留在原地（仍可通过「打开文件夹…」打开）。
+   * - 当前打开的项目被搬走 → 自动从新路径重开，UI 无缝续用。
+   * 落盘 settings.json 后返回迁移结果。
+   */
+  setProjectsDir(oldBase: string, newBase: string, migrate: boolean): { movedCount: number; reopened: boolean } {
+    this.assertNoActiveRun();
+    const fs = require('fs') as typeof import('fs');
+    if (newBase.trim() === '' || !path.isAbsolute(newBase)) {
+      throw new Error('INVALID_PROJECTS_DIR: 存储位置必须是绝对路径');
+    }
+    const projects = AppService.listProjects(oldBase);
+    const moved: string[] = [];
+    let movedOpen: string | null = null;
+    if (migrate) {
+      if (oldBase === newBase) throw new Error('SAME_PROJECTS_DIR: 新旧位置相同，无需迁移');
+      if (projects.length > 0) {
+        fs.mkdirSync(newBase, { recursive: true });
+        for (const p of projects) {
+          let dest = path.join(newBase, path.basename(p.dir));
+          let n = 2;
+          while (fs.existsSync(dest)) {
+            dest = path.join(newBase, `${path.basename(p.dir)}-${n}`);
+            n++;
+          }
+          AppService.copyDir(p.dir, dest);
+          moved.push(p.dir);
+          if (this.runtime && this.dir === p.dir) movedOpen = dest;
+        }
+        // 全部拷贝成功后才删除旧目录（残留删除失败不影响使用）
+        for (const src of moved) {
+          try {
+            fs.rmSync(src, { recursive: true, force: true });
+          } catch {
+            /* best effort */
+          }
+        }
+      }
+    }
+    if (movedOpen) {
+      this.closeProject(); // runtime 持有旧路径仓库，须重建
+      this.openProject(movedOpen);
+    }
+    saveSettings({ projectsDir: newBase });
+    return { movedCount: moved.length, reopened: movedOpen !== null };
   }
 
   // -------------------------------------------------------------- 状态
@@ -1085,10 +1156,45 @@ export class AppService {
     const path = this.prepareModelMessages(ws.conversation.readActivePath());
     const plan = planCompression(ws, path);
     const summary = plan.anchor ? ws.conversation.readBranchSummary(plan.anchor) : '';
+    const compressedRefs = plan.needsCompression
+      ? { attachmentIds: [...new Set(path.slice(0, plan.keptFrom).flatMap((m) => m.refs?.attachmentIds ?? []))] }
+      : undefined;
+    // inspect 是只读操作：已有摘要时按下一次真实调用的「摘要 + 最近原文」组装；
+    // 尚无摘要或压缩被阻断时，本轮仍会按完整活动路径计算。
+    const effectivePath = plan.needsCompression && plan.anchor && summary
+      ? [summaryMessage(plan.anchor, summary, compressedRefs), ...path.slice(plan.keptFrom)]
+      : path;
+    let usedTokens = estimatePathTokens(effectivePath);
+    let measurement: 'server-anchored' | 'estimated' = 'estimated';
+    let providerTokens: number | undefined;
+    let trailingEstimatedTokens: number | undefined;
+    let transientEstimatedTokens: number | undefined;
+    let anchorMessageId: string | undefined;
+    // 从后向前寻找最近一个仍匹配当前输入前缀的服务端快照。分支切换、消息编辑、
+    // 摘要变化都会改变指纹，使旧锚点自动失效并安全回退到全量估算。
+    for (let i = effectivePath.length - 1; i >= 0; i--) {
+      const message = effectivePath[i];
+      const anchor = message.role === 'ai' ? message.contextUsage : undefined;
+      if (!anchor || anchor.inputTokens + anchor.outputTokens <= 0) continue;
+      if (anchor.inputFingerprint !== contextInputFingerprint(effectivePath.slice(0, i))) continue;
+      providerTokens = anchor.inputTokens + anchor.outputTokens;
+      trailingEstimatedTokens = estimateTrailingTokens(effectivePath.slice(i + 1));
+      transientEstimatedTokens = anchor.transientEstimatedTokens ?? 0;
+      usedTokens = Math.max(0, providerTokens - transientEstimatedTokens) + trailingEstimatedTokens;
+      measurement = 'server-anchored';
+      anchorMessageId = message.id;
+      break;
+    }
     return {
       messageCount: path.length,
       budgetTokens: CONTEXT_BUDGET_TOKENS,
+      usedTokens,
       estimatedTokens: estimatePathTokens(path),
+      measurement,
+      ...(providerTokens !== undefined ? { providerTokens } : {}),
+      ...(trailingEstimatedTokens !== undefined ? { trailingEstimatedTokens } : {}),
+      ...(transientEstimatedTokens !== undefined ? { transientEstimatedTokens } : {}),
+      ...(anchorMessageId ? { anchorMessageId } : {}),
       compressed: plan.needsCompression && summary !== '',
       keptRawCount: plan.needsCompression ? path.length - plan.keptFrom : path.length,
       summaryAnchor: plan.needsCompression ? plan.anchor : undefined,
