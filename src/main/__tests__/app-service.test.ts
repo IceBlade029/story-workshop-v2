@@ -156,6 +156,60 @@ describe('app-service — 入口 A：讨论 → 整理 → 审阅 → 提交/回
     expect(service.getState().messages).toHaveLength(2);
   });
 
+  it('手动范围可留下空洞；局部返修沿用原始来源且只形成新审阅版本', async () => {
+    const service = makeService([
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'create_node', { type: 'chapter', title: '第一章', nodeId: 'c1' })], usage: usage(5, 2) },
+      { type: 'tool_calls', toolCalls: [toolCall('c2', 'write_draft', { nodeId: 'c1', content: '初版草稿' })], usage: usage(8, 2) },
+      { type: 'final', answer: '初次整理完成', usage: usage(10, 2) },
+      { type: 'tool_calls', toolCalls: [toolCall('c3', 'write_draft', { nodeId: 'c1', content: '按反馈修正后的草稿' })], usage: usage(12, 3) },
+      { type: 'final', answer: '局部返修完成', usage: usage(14, 2) },
+    ]);
+    service.sendMessage('需要整理的第一条');
+    service.sendMessage('这条先不要整理');
+    const [first, second] = service.getState().messages;
+
+    const initial = await service.run({
+      kind: 'organize',
+      scope: { type: 'selection', messageIds: [first.id], attachmentIds: [] },
+      note: '只落实第一条',
+    });
+    expect(initial.error).toBeUndefined();
+    expect(service.workspace.conversation.readUnorganizedMessages().map((m) => m.id)).toEqual([second.id]);
+    expect(service.getState().runSummaries[0].sourceMessageIds).toEqual([first.id]);
+
+    const revision = await service.run({
+      kind: 'organize',
+      revision: { parentRunId: initial.runId, mode: 'local', targetRefs: ['node:c1'], feedback: '不要写成确定事实' },
+    });
+    expect(revision.error).toBeUndefined();
+    expect(service.workspace.outline.readDraft('c1')).toBe('按反馈修正后的草稿');
+    const summaries = service.getState().runSummaries.filter((r) => (r.rootRunId ?? r.runId) === initial.runId);
+    expect(summaries).toHaveLength(2);
+    expect(summaries.find((r) => r.runId === revision.runId)).toMatchObject({
+      parentRunId: initial.runId,
+      revisionMode: 'local',
+      instruction: '不要写成确定事实',
+      sourceMessageIds: [first.id],
+    });
+  });
+
+  it('历史 diff 使用冻结 after；整理后手改会阻止破坏性整链回滚', async () => {
+    const service = makeService([
+      { type: 'tool_calls', toolCalls: [toolCall('c1', 'write_draft', { nodeId: 'overview', content: '整理写后版本' })], usage: usage(5, 2) },
+      { type: 'final', answer: '完成', usage: usage(8, 2) },
+    ]);
+    service.sendMessage('整理总纲');
+    const result = await service.run({ kind: 'organize', scope: { type: 'unorganized' } });
+    const firstDiff = service.runDiff(result.runId).find((d) => d.path === 'nodes/overview.draft.md');
+    expect(firstDiff?.after).toBe('整理写后版本');
+
+    service.workspace.outline.writeDraft('overview', '作者后来手改');
+    const historical = service.runDiff(result.runId).find((d) => d.path === 'nodes/overview.draft.md');
+    expect(historical?.after).toBe('整理写后版本');
+    expect(() => service.rollbackRun(result.runId)).toThrow('ROLLBACK_CONFLICT');
+    expect(service.workspace.outline.readDraft('overview')).toBe('作者后来手改');
+  });
+
   it('整理硬门禁（Part 4）：模型只输出讨论未调用写入工具 → ORGANIZE_NO_WRITE_TOOL，光标不推进', async () => {
     const service = makeService([
       { type: 'final', answer: '这些不是整理任务，而是讨论任务。请选一个方向往下钻。', usage: usage(5, 2) },

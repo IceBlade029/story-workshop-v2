@@ -29,6 +29,9 @@ import type { ChatMessage, ChangeItem, TaskKind, ToolCallTrace } from '../../sha
 import { contextInputFingerprint, estimateCharCount } from './context-compression';
 
 export const DEFAULT_MAX_TURNS = 25;
+/** organize 是一次性工具任务：给大段写入参数更高单轮上限，但保留上下文安全水位。 */
+export const ORGANIZE_MAX_OUTPUT_TOKENS = 65_536;
+export const ORGANIZE_CONTEXT_HIGH_WATER_TOKENS = 850_000;
 
 export interface RunRequest {
   taskKind: TaskKind;
@@ -36,6 +39,22 @@ export interface RunRequest {
   messages: ChatMessage[];
   /** 本次范围的人话描述（organize 展示在变更摘要顶部） */
   scope?: string;
+  /** organize 实际消化的持久来源；用于成功后写入消息/附件覆盖凭据。 */
+  sourceMessageIds?: string[];
+  sourceAttachmentIds?: string[];
+  instruction?: string;
+  organizeRevision?: {
+    rootRunId: string;
+    parentRunId: string;
+    mode: 'local' | 'global';
+    targetRefs: string[];
+  };
+  /** 返修写入能力边界；读取仍可覆盖项目知识库。 */
+  organizeWriteScope?: {
+    nodeIds: Set<string>;
+    assetIds: Set<string>;
+    allowCreate: boolean;
+  };
   /**
    * 活动路径末端消息 id：本运行追加的 system 事件与 AI 回答
    * 以它为父节点挂入消息树（§3.2）。缺省 = 不挂父节点（根级）。
@@ -223,6 +242,15 @@ export class RunCoordinator {
       turns++;
 
       const input = this.buildTurnInput(taskDef, request, whitelist, baseMessages, turnContext);
+      if (request.taskKind === 'organize') {
+        // 工具调用、工具结果与思考内容会在 run 内持续回传。调用前做硬水位检查，
+        // 避免把物理 1M 窗口吃满后才由供应商截断或报错。
+        const estimatedInputTokens = estimateCharCount(JSON.stringify(input).length) + 20_000;
+        if (estimatedInputTokens > ORGANIZE_CONTEXT_HIGH_WATER_TOKENS) {
+          error = `ORGANIZE_CONTEXT_BUDGET_EXCEEDED: 当前整理运行预计输入 ${estimatedInputTokens.toLocaleString()} tokens，已超过安全水位 ${ORGANIZE_CONTEXT_HIGH_WATER_TOKENS.toLocaleString()}。请缩小范围或分批整理。`;
+          break;
+        }
+      }
       let turn: ModelTurn;
       try {
         turn = await this.deps.model.runTurn(input, {
@@ -338,6 +366,13 @@ export class RunCoordinator {
           ...(request.resourceScope
             ? { allowedSceneId: request.resourceScope.sceneId, allowedFormat: request.resourceScope.format }
             : {}),
+          ...(request.organizeWriteScope
+            ? {
+                allowedOrganizeNodeIds: request.organizeWriteScope.nodeIds,
+                allowedOrganizeAssetIds: request.organizeWriteScope.assetIds,
+                allowOrganizeCreate: request.organizeWriteScope.allowCreate,
+              }
+            : {}),
         };
         let result: ToolResult;
         // P0 修复：执行前做真正的 Schema 校验（必填/类型/枚举 + 未声明字段剔除）；
@@ -435,11 +470,20 @@ export class RunCoordinator {
 
     const changes = recorder.changes;
     if (snapshotId) {
+      workspace.snapshots.captureAfterState(runId);
       persistRunSummary(workspace, {
         runId,
         taskKind: request.taskKind,
         snapshotId,
         scope: request.scope ?? '',
+        instruction: request.instruction,
+        sourceMessageIds: request.sourceMessageIds,
+        sourceAttachmentIds: request.sourceAttachmentIds,
+        rootRunId: request.organizeRevision?.rootRunId,
+        parentRunId: request.organizeRevision?.parentRunId,
+        revisionMode: request.organizeRevision?.mode,
+        revisionTargets: request.organizeRevision?.targetRefs,
+        finalAnswer,
         changes,
       });
     }
@@ -452,7 +496,9 @@ export class RunCoordinator {
         source: m.id.startsWith('summary-') ? 'summary' : 'raw',
         chars: m.content.length,
       }));
-      const systemPrompt = taskDef.systemPrompt + (request.scope ? `\n\n本次范围：${request.scope}` : '');
+      const systemPrompt = taskDef.systemPrompt
+        + (request.scope ? `\n\n本次范围：${request.scope}` : '')
+        + (request.instruction ? `\n\n作者本次要求：${request.instruction}` : '');
       persistRunRecord(workspace, {
         runId,
         taskKind: request.taskKind,
@@ -524,7 +570,13 @@ export class RunCoordinator {
   ): ModelTurnInput {
     // 回答详略档位：仅 chat 任务注入（organize 总结 / 正文输出不受影响）
     const detailRule = request.taskKind === 'chat' ? ANSWER_DETAIL_RULES[request.answerDetail ?? 'auto'] : '';
-    const systemPrompt = taskDef.systemPrompt + (request.scope ? `\n\n本次范围：${request.scope}` : '') + (detailRule ? `\n\n${detailRule}` : '');
+    const systemPrompt = taskDef.systemPrompt
+      + (request.scope ? `\n\n本次范围：${request.scope}` : '')
+      + (request.instruction ? `\n\n作者本次要求：${request.instruction}` : '')
+      + (request.organizeRevision
+        ? `\n\n这是对既有整理结果的${request.organizeRevision.mode === 'local' ? '局部' : '整体'}返修。只按作者反馈修正，保留未要求改变的结果；不得把返修当作重新自由整理。`
+        : '')
+      + (detailRule ? `\n\n${detailRule}` : '');
     const messages: ModelTurnInput['messages'] = [...baseMessages, ...turnContext];
 
     const tools = this.deps.registry

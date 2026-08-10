@@ -83,6 +83,20 @@ describe('conversation-repository — history.jsonl', () => {
 });
 
 describe('conversation-repository — 整理光标与 meta', () => {
+  it('消息级整理覆盖支持中间剔除：空洞保持未整理，补回后光标推进连续前缀', () => {
+    const { conv } = makeConversation();
+    conv.appendMessage(msg('m1', 'user', '一'));
+    conv.appendMessage(msg('m2', 'user', '二'));
+    conv.appendMessage(msg('m3', 'user', '三'));
+
+    conv.markMessagesOrganized(['m1', 'm3'], 'run_1');
+    expect(conv.readUnorganizedMessages().map((m) => m.id)).toEqual(['m2']);
+    expect(conv.getOrganizeCursor()).toBe('m1');
+
+    conv.markMessagesOrganized(['m2'], 'run_2');
+    expect(conv.readUnorganizedMessages()).toEqual([]);
+    expect(conv.getOrganizeCursor()).toBe('m3');
+  });
   it('setOrganizeCursor / getOrganizeCursor 往返', () => {
     const { conv, projectDir } = makeConversation();
     expect(conv.getOrganizeCursor()).toBeUndefined();

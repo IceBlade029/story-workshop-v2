@@ -17,6 +17,7 @@ import * as path from 'path';
 import { readJsonFile, writeJsonFile } from '../file-store';
 import { writeTextAtomic } from '../atomic-write';
 import { generateId } from './id';
+import { sha256 } from './hash';
 import type { ChatMessage, ConversationMeta, ConversationSession } from '../../shared/types';
 
 export class ConversationRepository {
@@ -269,6 +270,75 @@ export class ConversationRepository {
     return this.readMeta().lastOrganizedMessageId;
   }
 
+  /** 当前有效的消息级整理覆盖记录（同 id 内容变化后凭据自动失效）。 */
+  getOrganizedMessages(): ConversationMeta['organizedMessages'] {
+    return this.readMeta().organizedMessages;
+  }
+
+  private messageContentHash(message: ChatMessage): string {
+    return sha256(JSON.stringify({
+      role: message.role,
+      content: message.content,
+      refs: message.refs ?? null,
+    }));
+  }
+
+  /**
+   * 记录本次真正消化的消息。首次从旧光标迁移时，把光标之前的活动路径
+   * 物化为凭据；之后任意选择产生的空洞都能被准确保留为未整理。
+   */
+  markMessagesOrganized(messageIds: string[], runId: string): void {
+    const meta = this.readMeta();
+    const all = this.readMessages();
+    const byId = new Map(all.map((m) => [m.id, m]));
+    const existing = new Map((meta.organizedMessages ?? []).map((r) => [r.messageId, r]));
+
+    if (!meta.organizedMessages && meta.lastOrganizedMessageId) {
+      const path = this.readActivePath();
+      const cursorIdx = path.findIndex((m) => m.id === meta.lastOrganizedMessageId);
+      if (cursorIdx >= 0) {
+        for (const message of path.slice(0, cursorIdx + 1)) {
+          if (message.role === 'system') continue;
+          existing.set(message.id, {
+            messageId: message.id,
+            contentHash: this.messageContentHash(message),
+            runId: 'legacy-cursor',
+            organizedAt: new Date(0).toISOString(),
+          });
+        }
+      }
+    }
+
+    const organizedAt = new Date().toISOString();
+    for (const id of new Set(messageIds)) {
+      const message = byId.get(id);
+      if (!message || message.role === 'system') continue;
+      existing.set(id, {
+        messageId: id,
+        contentHash: this.messageContentHash(message),
+        runId,
+        organizedAt,
+      });
+    }
+
+    const organizedMessages = [...existing.values()];
+    const valid = new Set(
+      organizedMessages
+        .filter((r) => {
+          const message = byId.get(r.messageId);
+          return message && this.messageContentHash(message) === r.contentHash;
+        })
+        .map((r) => r.messageId),
+    );
+    const active = this.readActivePath().filter((m) => m.role !== 'system');
+    let contiguousCursor: string | undefined;
+    for (const message of active) {
+      if (!valid.has(message.id)) break;
+      contiguousCursor = message.id;
+    }
+    this.updateMeta({ organizedMessages, lastOrganizedMessageId: contiguousCursor });
+  }
+
   /**
    * 读取整理光标之后未整理的消息（§5.3：默认范围 = 光标之后、沿活动路径
    * 未整理的对话）。无光标 = 整条活动路径；光标不在活动路径上（如切到
@@ -278,6 +348,13 @@ export class ConversationRepository {
    * 光标本身可能指向 system 事件（organize 后光标 = 运行结束事件）。
    */
   readUnorganizedMessages(): ChatMessage[] {
+    const meta = this.readMeta();
+    if (meta.organizedMessages) {
+      const receipts = new Map(meta.organizedMessages.map((r) => [r.messageId, r.contentHash]));
+      return this.readActivePath().filter((message) =>
+        message.role !== 'system' && receipts.get(message.id) !== this.messageContentHash(message),
+      );
+    }
     const cursor = this.getOrganizeCursor();
     const fullPath = this.readActivePath();
     const idx = cursor ? fullPath.findIndex((m) => m.id === cursor) : -1;

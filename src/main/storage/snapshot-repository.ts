@@ -39,6 +39,14 @@ export class SnapshotRepository {
     return path.join(this.snapshotDir(runId), 'manifest.json');
   }
 
+  private afterDir(runId: string): string {
+    return path.join(this.snapshotDir(runId), '_after');
+  }
+
+  private afterManifestFilePath(runId: string): string {
+    return path.join(this.afterDir(runId), 'manifest.json');
+  }
+
   /**
    * 把绝对路径转为项目内相对路径（统一用 `/` 分隔，跨平台可移植）。
    * 项目目录外或绝对路径本身异常时返回 null。
@@ -86,6 +94,76 @@ export class SnapshotRepository {
     };
     fs.writeFileSync(this.manifestFilePath(runId), JSON.stringify(info, null, 2), 'utf-8');
     return info;
+  }
+
+  /**
+   * 冻结一次可写运行结束时的项目状态。历史 diff 必须比较 before/after，
+   * 不能把不断变化的当前工作区冒充为当次运行结果。
+   */
+  captureAfterState(runId: string): SnapshotInfo {
+    if (!this.readManifest(runId)) throw new Error(`SNAPSHOT_NOT_FOUND: ${runId}`);
+    const targetDir = this.afterDir(runId);
+    ensureDir(targetDir);
+    const relativeFiles = [
+      ...(fileExists(path.join(this.projectDir, 'outline.json')) ? ['outline.json'] : []),
+      ...this.scanFilesInDirs(SNAPSHOT_DIRS),
+    ];
+    const files: string[] = [];
+    for (const relative of relativeFiles) {
+      const src = path.join(this.projectDir, ...relative.split('/'));
+      if (!fileExists(src)) continue;
+      const dest = path.join(targetDir, ...relative.split('/'));
+      ensureDir(path.dirname(dest));
+      fs.copyFileSync(src, dest);
+      files.push(relative);
+    }
+    const info: SnapshotInfo = {
+      runId,
+      files,
+      dirs: [...SNAPSHOT_DIRS],
+      preExistingFiles: files.filter((f) => f !== 'outline.json'),
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(this.afterManifestFilePath(runId), JSON.stringify(info, null, 2), 'utf-8');
+    return info;
+  }
+
+  readAfterManifest(runId: string): SnapshotInfo | null {
+    const file = this.afterManifestFilePath(runId);
+    if (!fileExists(file)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf-8')) as SnapshotInfo;
+    } catch {
+      return null;
+    }
+  }
+
+  readCapturedFile(runId: string, phase: 'before' | 'after', relative: string): string | null {
+    const root = phase === 'before' ? this.snapshotDir(runId) : this.afterDir(runId);
+    const file = resolveWithin(root, '.', relative.split('/').join(path.sep));
+    try {
+      return fileExists(file) ? fs.readFileSync(file, 'utf-8') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 当前项目是否仍精确等于该运行冻结的 after 状态；安全整链回滚的冲突门禁。 */
+  matchesCurrentAfterState(runId: string): boolean {
+    const after = this.readAfterManifest(runId);
+    if (!after) return false;
+    const expected = new Set(after.files);
+    const current = new Set([
+      ...(fileExists(path.join(this.projectDir, 'outline.json')) ? ['outline.json'] : []),
+      ...this.scanFilesInDirs(SNAPSHOT_DIRS),
+    ]);
+    if (expected.size !== current.size || [...expected].some((file) => !current.has(file))) return false;
+    for (const relative of expected) {
+      const frozen = this.readCapturedFile(runId, 'after', relative);
+      const livePath = path.join(this.projectDir, ...relative.split('/'));
+      if (!fileExists(livePath) || frozen === null || fs.readFileSync(livePath, 'utf-8') !== frozen) return false;
+    }
+    return true;
   }
 
   /** 扫描若干顶层目录（相对项目根）内的全部文件，返回 `/` 分隔的相对路径。 */
@@ -231,7 +309,18 @@ export class SnapshotRepository {
     const runs = snapshots
       .filter((s) => !s.startsWith('commit-'))
       .sort((a, b) => (this.readManifest(a)?.createdAt ?? '').localeCompare(this.readManifest(b)?.createdAt ?? ''));
-    const excess = runs.slice(0, Math.max(0, runs.length - maxRunSnapshots));
+    const pendingReview = new Set(runs.filter((runId) => {
+      try {
+        const summaryFile = path.join(this.snapshotDir(runId), 'summary.json');
+        if (!fileExists(summaryFile)) return false;
+        const summary = JSON.parse(fs.readFileSync(summaryFile, 'utf-8')) as { taskKind?: string; reviewStatus?: string };
+        return summary.taskKind === 'organize' && summary.reviewStatus === 'pending';
+      } catch {
+        return false;
+      }
+    }));
+    const deleteCount = Math.max(0, runs.length - maxRunSnapshots);
+    const excess = runs.filter((runId) => !pendingReview.has(runId)).slice(0, deleteCount);
     for (const runId of excess) this.deleteSnapshot(runId);
     return excess;
   }

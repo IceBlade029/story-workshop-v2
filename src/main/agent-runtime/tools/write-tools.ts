@@ -41,6 +41,10 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       async execute(ctx: ToolContext, args: { parentId?: string; type: NodeType; title: string; nodeId?: string; hidden?: boolean }) {
         return withProjectWriteLock(projectDir(), () => {
           const repo = outline();
+          const parentId = args.parentId ?? OVERVIEW_ROOT_ID;
+          if (ctx.allowedOrganizeNodeIds && (!ctx.allowOrganizeCreate || (parentId !== OVERVIEW_ROOT_ID && !ctx.allowedOrganizeNodeIds.has(parentId)))) {
+            return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', `返修不允许在目标范围外创建节点（parentId=${parentId}）`);
+          }
           const id = args.nodeId ?? generateId('n');
           if (args.nodeId !== undefined) {
             // P0 修复：模型自定义 id 必须通过安全校验（防目录穿越），
@@ -60,11 +64,12 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
             ...(args.hidden ? { hidden: true } : {}),
             aiCreated: true,
           };
-          repo.createNode(args.parentId ?? OVERVIEW_ROOT_ID, node);
+          repo.createNode(parentId, node);
+          ctx.allowedOrganizeNodeIds?.add(id);
           ctx.recordChange({
             action: 'node_created',
             nodeId: id,
-            parentId: args.parentId ?? OVERVIEW_ROOT_ID,
+            parentId,
             title: args.title,
           });
           return ok({ id, type: node.type, title: node.title, aiCreated: true });
@@ -87,6 +92,9 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       async execute(ctx: ToolContext, args: { nodeId: string; title: string }) {
         return withProjectWriteLock(projectDir(), () => {
           const repo = outline();
+          if (ctx.allowedOrganizeNodeIds && !ctx.allowedOrganizeNodeIds.has(args.nodeId)) {
+            return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', `返修不允许重命名未选节点: ${args.nodeId}`);
+          }
           const node = repo.findNode(args.nodeId);
           if (!node) return fail('NODE_NOT_FOUND', `节点不存在: ${args.nodeId}`);
           const from = node.title;
@@ -111,6 +119,9 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       async execute(ctx: ToolContext, args: { nodeId: string }) {
         return withProjectWriteLock(projectDir(), () => {
           const repo = outline();
+          if (ctx.allowedOrganizeNodeIds && !ctx.allowedOrganizeNodeIds.has(args.nodeId)) {
+            return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', `返修不允许删除未选节点: ${args.nodeId}`);
+          }
           if (!repo.findNode(args.nodeId)) return fail('NODE_NOT_FOUND', `节点不存在: ${args.nodeId}`);
           new TrashRepository(projectDir(), repo).moveToTrash(args.nodeId);
           ctx.recordChange({ action: 'node_deleted', nodeId: args.nodeId });
@@ -134,6 +145,9 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
       async execute(ctx: ToolContext, args: { nodeId: string; content: string }) {
         return withProjectWriteLock(projectDir(), () => {
           const repo = outline();
+          if (ctx.allowedOrganizeNodeIds && !ctx.allowedOrganizeNodeIds.has(args.nodeId)) {
+            return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', `返修不允许写入未选节点: ${args.nodeId}`);
+          }
           if (!repo.findNode(args.nodeId)) return fail('NODE_NOT_FOUND', `节点不存在: ${args.nodeId}`);
           const before = repo.hasDraft(args.nodeId) ? sha256(repo.readDraft(args.nodeId)) : undefined;
           repo.writeDraft(args.nodeId, args.content);
@@ -162,6 +176,9 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
         return withProjectWriteLock(projectDir(), () => {
           const repo = assets();
           if (args.assetId) {
+            if (ctx.allowedOrganizeAssetIds && !ctx.allowedOrganizeAssetIds.has(args.assetId)) {
+              return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', `返修不允许写入未选设定: ${args.assetId}`);
+            }
             const existing = repo.readAsset(args.assetId);
             if (!existing) return fail('ASSET_NOT_FOUND', `设定不存在: ${args.assetId}`);
             const updated = repo.updateAsset(args.assetId, {
@@ -177,9 +194,13 @@ export function makeWriteTools(projectDir: () => string): ToolSpec[] {
             });
             return ok({ assetId: updated.id, action: 'updated', hash: updated.hash });
           }
+          if (ctx.allowedOrganizeAssetIds && !ctx.allowOrganizeCreate) {
+            return fail('ORGANIZE_REVISION_OUT_OF_SCOPE', '局部返修不允许新建未选设定');
+          }
           const type = args.type ?? 'misc';
           const title = args.title ?? '';
           const asset = repo.createAsset(type, title, args.content);
+          ctx.allowedOrganizeAssetIds?.add(asset.id);
           ctx.recordChange({ action: 'asset_created', assetId: asset.id, type: asset.type, title: asset.title });
           return ok({ assetId: asset.id, action: 'created', type: asset.type, title: asset.title, hash: asset.hash });
         });

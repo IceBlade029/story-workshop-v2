@@ -820,6 +820,19 @@ button:focus-visible, input:focus-visible, select:focus-visible { box-shadow: va
 .organize-hint:hover { color: var(--accent); }
 .organize-detail { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px dashed var(--border-strong); border-radius: var(--radius-m); background: var(--bg-subtle); }
 .organize-note { min-height: 54px; resize: vertical; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-m); font-family: inherit; font-size: 12px; background: var(--bg-panel); }
+.organize-scope-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.organize-scope-section { border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--bg-panel); overflow: hidden; }
+.organize-scope-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; background: var(--bg-subtle); color: var(--text); padding: 7px 9px; cursor: pointer; text-align: left; }
+.organize-scope-toggle:hover { color: var(--accent); }
+.organize-scope-list { max-height: 220px; overflow: auto; display: flex; flex-direction: column; padding: 4px; }
+.organize-scope-item { display: flex; align-items: flex-start; gap: 7px; padding: 6px; border-radius: var(--radius-s); cursor: pointer; }
+.organize-scope-item:hover { background: var(--bg-subtle); }
+.organize-scope-item > input { margin-top: 3px; flex-shrink: 0; }
+.organize-scope-item-body { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.organize-scope-item details pre { max-height: 180px; overflow: auto; white-space: pre-wrap; padding: 6px; margin: 4px 0 0; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--bg-subtle); font: 11px/1.5 var(--font-mono); }
+.organize-budget { padding: 6px 8px; border-radius: var(--radius-s); background: var(--success-bg); color: var(--success); font-size: 11px; }
+.organize-budget-warn { background: var(--warning-bg); color: var(--warning); }
+.organize-review-meta { display: flex; flex-direction: column; gap: 3px; padding: 7px 8px; border-radius: var(--radius-s); background: var(--bg-panel); font-size: 12px; }
 /* 跳到底部浮标（智能滚动） */
 .jump-bottom {
   position: absolute; bottom: 200px; left: 50%; transform: translateX(-50%); z-index: 30;

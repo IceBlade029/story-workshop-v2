@@ -5,7 +5,7 @@
 import type { ToolSpec } from '../tool-types';
 import { OutlineRepository, OVERVIEW_ROOT_ID } from '../../storage/outline-repository';
 import { sha256 } from '../../storage/hash';
-import { ok, fail, nodeEvidence, matchesQuery } from './tool-utils';
+import { ok, fail, nodeEvidence, matchesQuery, sliceToolContent } from './tool-utils';
 import type { NodeType, OutlineNode } from '../../../shared/types';
 
 interface FlatNode {
@@ -66,21 +66,24 @@ export function makeNodeReadTools(projectDir: () => string): ToolSpec[] {
 
     {
       name: 'read_node',
-      description: '读取节点正式版内容与元数据（含官方 hash、是否有草稿）。',
+      description: '分段读取节点正式版内容与元数据（含官方 hash、是否有草稿）。默认最多 40000 字。',
       inputSchema: {
         type: 'object',
         properties: {
           nodeId: { type: 'string', description: '节点 id' },
+          start: { type: 'number', description: '起始字符位置（缺省 0）' },
+          maxChars: { type: 'number', description: '本段最大字符数（缺省 40000，最高 100000）' },
         },
         required: ['nodeId'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { nodeId: string }) {
+      async execute(_ctx, args: { nodeId: string; start?: number; maxChars?: number }) {
         const repo = outline();
         const node = repo.findNode(args.nodeId);
         if (!node) return fail('NODE_NOT_FOUND', `节点不存在: ${args.nodeId}`);
         const content = repo.readOfficial(args.nodeId);
         const meta = repo.readMeta(args.nodeId);
+        const sliced = sliceToolContent(content, args.start, args.maxChars);
         return ok(
           {
             id: node.id,
@@ -88,35 +91,41 @@ export function makeNodeReadTools(projectDir: () => string): ToolSpec[] {
             title: node.title,
             hidden: node.hidden ?? false,
             aiCreated: node.aiCreated ?? false,
-            content,
+            content: sliced.content,
+            range: sliced.range,
             officialHash: meta.officialHash ?? sha256(content),
             hasDraft: repo.hasDraft(node.id),
             updatedAt: meta.updatedAt,
           },
-          [nodeEvidence(node.id, meta.officialHash ?? sha256(content), content.slice(0, 200))],
+          [nodeEvidence(node.id, meta.officialHash ?? sha256(content), sliced.content.slice(0, 200))],
+          sliced.range.hasMore,
         );
       },
     },
 
     {
       name: 'read_draft',
-      description: '读取节点草稿内容与草稿 hash。',
+      description: '分段读取节点草稿内容与草稿 hash。默认最多 40000 字。',
       inputSchema: {
         type: 'object',
         properties: {
           nodeId: { type: 'string', description: '节点 id' },
+          start: { type: 'number', description: '起始字符位置（缺省 0）' },
+          maxChars: { type: 'number', description: '本段最大字符数（缺省 40000，最高 100000）' },
         },
         required: ['nodeId'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { nodeId: string }) {
+      async execute(_ctx, args: { nodeId: string; start?: number; maxChars?: number }) {
         const repo = outline();
         if (!repo.findNode(args.nodeId)) return fail('NODE_NOT_FOUND', `节点不存在: ${args.nodeId}`);
         if (!repo.hasDraft(args.nodeId)) return fail('DRAFT_NOT_FOUND', `节点没有草稿: ${args.nodeId}`);
         const content = repo.readDraft(args.nodeId);
+        const sliced = sliceToolContent(content, args.start, args.maxChars);
         return ok(
-          { nodeId: args.nodeId, content, draftHash: sha256(content) },
-          [nodeEvidence(args.nodeId, sha256(content), content.slice(0, 200))],
+          { nodeId: args.nodeId, content: sliced.content, range: sliced.range, draftHash: sha256(content) },
+          [nodeEvidence(args.nodeId, sha256(content), sliced.content.slice(0, 200))],
+          sliced.range.hasMore,
         );
       },
     },

@@ -324,6 +324,34 @@ describe('App 冒烟 — 创建项目后布局完整显示（防白屏回归）'
     expect(screen.getAllByText('✎ 编辑')).toHaveLength(1);
   });
 
+  it('整理按钮先打开可编辑范围，确认后才发送明确 selection 与自然语言要求', async () => {
+    const api = makeApi();
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '整理' }));
+    expect(screen.getByText('本次整理范围')).toBeTruthy();
+    expect(screen.getByText(/已选 2\/2/)).toBeTruthy();
+    expect(api.run.start).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText(/整理规划或意见/), { target: { value: '不要补写缺失事实' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '确认整理' }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(api.run.start).toHaveBeenCalledWith({
+      kind: 'organize',
+      scope: { type: 'selection', messageIds: ['m1', 'm2'], attachmentIds: [] },
+      note: '不要补写缺失事实',
+    });
+  });
+
   it('上下文用量：位于右侧动作组，显示主进程用量并提供悬浮明细进度', async () => {
     await renderApp();
     fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });

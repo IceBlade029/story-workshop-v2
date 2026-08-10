@@ -11,7 +11,7 @@
 import type { ToolSpec } from '../tool-types';
 import { AttachmentRepository } from '../../storage/attachment-repository';
 import { sha256 } from '../../storage/hash';
-import { ok, fail, attachmentEvidence } from './tool-utils';
+import { ok, fail, attachmentEvidence, sliceToolContent } from './tool-utils';
 
 export function makeAttachmentReadTools(projectDir: () => string): ToolSpec[] {
   const attachments = () => new AttachmentRepository(projectDir());
@@ -52,16 +52,18 @@ export function makeAttachmentReadTools(projectDir: () => string): ToolSpec[] {
 
     {
       name: 'read_attachment',
-      description: '读取单个附件的完整正文与元数据（仅限当前会话范围内引用的附件）。',
+      description: '分段读取单个附件正文与元数据（仅限当前会话范围内引用的附件）。默认最多 40000 字；range.hasMore=true 时用 range.end 继续。',
       inputSchema: {
         type: 'object',
         properties: {
           attachmentId: { type: 'string', description: '附件 id' },
+          start: { type: 'number', description: '起始字符位置（缺省 0）' },
+          maxChars: { type: 'number', description: '本段最大字符数（缺省 40000，最高 100000）' },
         },
         required: ['attachmentId'],
       } as never,
       outputSchema: {} as never,
-      async execute(ctx, args: { attachmentId: string }) {
+      async execute(ctx, args: { attachmentId: string; start?: number; maxChars?: number }) {
         if (ctx.attachmentScope && !ctx.attachmentScope.has(args.attachmentId)) {
           return fail(
             'ATTACHMENT_OUT_OF_SCOPE',
@@ -70,17 +72,20 @@ export function makeAttachmentReadTools(projectDir: () => string): ToolSpec[] {
         }
         const read = attachments().readAttachment(args.attachmentId);
         if (!read) return fail('ATTACHMENT_NOT_FOUND', `附件不存在: ${args.attachmentId}`);
+        const sliced = sliceToolContent(read.content, args.start, args.maxChars);
         return ok(
           {
             id: read.meta.id,
             name: read.meta.name,
             source: read.meta.source,
             size: read.meta.size,
-            content: read.content,
+            content: sliced.content,
+            range: sliced.range,
             hash: sha256(read.content),
             mtime: read.meta.mtime,
           },
-          [attachmentEvidence(read.meta.id, sha256(read.content), read.content.slice(0, 200))],
+          [attachmentEvidence(read.meta.id, sha256(read.content), sliced.content.slice(0, 200))],
+          sliced.range.hasMore,
         );
       },
     },
@@ -114,29 +119,34 @@ export function makeAttachmentReadTools(projectDir: () => string): ToolSpec[] {
 
     {
       name: 'read_any_attachment',
-      description: '读取项目任意附件的完整正文与元数据（跨会话）。仅在作者明确要求查看其他会话/项目附件时使用。',
+      description: '分段读取项目任意附件正文与元数据（跨会话）。默认最多 40000 字；仅在作者明确要求查看其他会话/项目附件时使用。',
       inputSchema: {
         type: 'object',
         properties: {
           attachmentId: { type: 'string', description: '附件 id' },
+          start: { type: 'number', description: '起始字符位置（缺省 0）' },
+          maxChars: { type: 'number', description: '本段最大字符数（缺省 40000，最高 100000）' },
         },
         required: ['attachmentId'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { attachmentId: string }) {
+      async execute(_ctx, args: { attachmentId: string; start?: number; maxChars?: number }) {
         const read = attachments().readAttachment(args.attachmentId);
         if (!read) return fail('ATTACHMENT_NOT_FOUND', `附件不存在: ${args.attachmentId}`);
+        const sliced = sliceToolContent(read.content, args.start, args.maxChars);
         return ok(
           {
             id: read.meta.id,
             name: read.meta.name,
             source: read.meta.source,
             size: read.meta.size,
-            content: read.content,
+            content: sliced.content,
+            range: sliced.range,
             hash: sha256(read.content),
             mtime: read.meta.mtime,
           },
-          [attachmentEvidence(read.meta.id, sha256(read.content), read.content.slice(0, 200))],
+          [attachmentEvidence(read.meta.id, sha256(read.content), sliced.content.slice(0, 200))],
+          sliced.range.hasMore,
         );
       },
     },

@@ -44,7 +44,7 @@ export type RunKind = 'chat' | 'organize' | 'detail_fill' | 'revise';
 /** 一次 run 的启动参数（错误/取消后「重试」用，ux-review §4.1）。 */
 export type RunRequestParams =
   | { kind: 'chat'; parentMessageId?: string; answerDetail?: AnswerDetail }
-  | { kind: 'organize'; scope?: import('../shared/ipc-types').OrganizeScope; note?: string }
+  | { kind: 'organize'; scope?: import('../shared/ipc-types').OrganizeScope; note?: string; revision?: import('../shared/ipc-types').RunStartRequest['revision'] }
   | { kind: 'detail_fill'; sceneId: string; format: string; feedback?: string }
   | { kind: 'revise'; sceneId: string; format: string; start: number; end: number; instruction: string }
   | { kind: 'refresh'; messageId: string; answerDetail?: AnswerDetail };
@@ -102,7 +102,7 @@ export interface AppState {
    * P1 修复：失败/取消的整理同样进卡片（failed），提供「部分写入详情 + 回滚」
    * 恢复入口——快照与变更摘要已为失败 run 落盘。
    */
-  lastOrganize: { runId: string; finalAnswer: string; failed?: boolean; error?: string } | null;
+  lastOrganize: { runId: string; finalAnswer: string; failed?: boolean; error?: string; autoRolledBack?: boolean } | null;
   toast: { message: string; kind: ToastKind } | null;
   /** 大纲树展开状态（§3.1，切 tab 不丢） */
   expandedIds: Set<string>;
@@ -232,7 +232,10 @@ function computeDerived(project: ProjectState | null): { activePath: ChatMessage
   }
   // 与主进程一致：system 事件不计入未整理
   let unorganizedCount: number;
-  if (project.organizeCursor) {
+  if (project.organizedMessages) {
+    const organized = new Set(project.organizedMessages.map((r) => r.messageId));
+    unorganizedCount = path.filter((m) => m.role !== 'system' && !organized.has(m.id)).length;
+  } else if (project.organizeCursor) {
     const idx = path.findIndex((m) => m.id === project.organizeCursor);
     unorganizedCount = idx >= 0
       ? path.slice(idx + 1).filter((m) => m.role !== 'system').length
@@ -375,13 +378,15 @@ export const store = {
   async createProject(name: string): Promise<void> {
     const api = getApi();
     const project = await api.project.create(name);
-    setState({ project, selected: null, workspaceMode: null });
+    const pending = project.runSummaries.find((r) => r.taskKind === 'organize' && (r.reviewStatus ?? 'pending') === 'pending');
+    setState({ project, selected: null, workspaceMode: null, lastOrganize: pending ? { runId: pending.runId, finalAnswer: pending.finalAnswer ?? '' } : null });
   },
 
   async openProject(dir: string): Promise<void> {
     const api = getApi();
     const project = await api.project.open(dir);
-    setState({ project, selected: null, workspaceMode: null });
+    const pending = project.runSummaries.find((r) => r.taskKind === 'organize' && (r.reviewStatus ?? 'pending') === 'pending');
+    setState({ project, selected: null, workspaceMode: null, lastOrganize: pending ? { runId: pending.runId, finalAnswer: pending.finalAnswer ?? '' } : null });
   },
 
   async pickAndOpen(): Promise<void> {
@@ -650,16 +655,24 @@ export const store = {
     await this.startRun('chat', { parentMessageId: project.activeMessageId, answerDetail: state.answerDetail });
   },
 
-  async organize(scope?: 'unorganized' | 'all', note?: string): Promise<void> {
-    await this.startRun('organize', { scope: scope === 'all' ? { type: 'all' } : { type: 'unorganized' }, note });
+  async organize(scope?: import('../shared/ipc-types').OrganizeScope, note?: string): Promise<void> {
+    await this.startRun('organize', { scope: scope ?? { type: 'unorganized' }, note });
   },
 
-  async startRun(kind: 'chat' | 'organize', req: { parentMessageId?: string; scope?: import('../shared/ipc-types').OrganizeScope; note?: string; answerDetail?: AnswerDetail }): Promise<void> {
+  async reviseOrganize(parentRunId: string, mode: 'local' | 'global', targetRefs: string[], feedback: string): Promise<void> {
+    const trimmed = feedback.trim();
+    if (!trimmed) throw new Error('请填写返修要求');
+    await this.startRun('organize', {
+      revision: { parentRunId, mode, targetRefs, feedback: trimmed },
+    });
+  },
+
+  async startRun(kind: 'chat' | 'organize', req: { parentMessageId?: string; scope?: import('../shared/ipc-types').OrganizeScope; note?: string; answerDetail?: AnswerDetail; revision?: import('../shared/ipc-types').RunStartRequest['revision'] }): Promise<void> {
     const api = getApi();
     const { runId } = await api.run.start({ kind, ...req });
     const retry: RunRequestParams = kind === 'chat'
       ? { kind: 'chat', parentMessageId: req.parentMessageId, answerDetail: req.answerDetail }
-      : { kind: 'organize', scope: req.scope ?? { type: 'unorganized' }, note: req.note };
+      : { kind: 'organize', scope: req.scope ?? { type: 'unorganized' }, note: req.note, revision: req.revision };
     withState((s) => ({ ...s, refreshingMessageId: null, activeRun: { runId, kind, chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry } }));
     scheduleRunFallback(runId);
   },
@@ -734,7 +747,7 @@ export const store = {
         break;
       }
       case 'organize': {
-        const { runId } = await getApi().run.start({ kind: 'organize', scope: params.scope ?? { type: 'unorganized' }, note: params.note });
+        const { runId } = await getApi().run.start({ kind: 'organize', scope: params.scope ?? { type: 'unorganized' }, note: params.note, revision: params.revision });
         withState((s) => ({ ...s, activeRun: { runId, kind: 'organize', chunks: [], reasoning: [], searching: false, traces: [], status: 'running', retry: params } }));
         scheduleRunFallback(runId);
         break;
@@ -924,6 +937,7 @@ export const store = {
                 finalAnswer: event.result.finalAnswer ?? '',
                 failed: true,
                 error: event.result.error ?? (event.result.cancelled ? '已取消（可能已产生部分写入）' : '未知错误'),
+                ...(run.retry?.kind === 'organize' && run.retry.revision ? { autoRolledBack: true } : {}),
               },
             }));
           }
@@ -1179,13 +1193,13 @@ export const store = {
   async acceptRun(runId: string): Promise<void> {
     const api = getApi();
     const project = await api.run.accept(runId);
-    setState({ project });
+    setState({ project, lastOrganize: null });
   },
 
   async rollbackRun(runId: string): Promise<void> {
     const api = getApi();
     const project = await api.run.rollback(runId);
-    setState({ project });
+    setState({ project, lastOrganize: null });
   },
 
   /** 变更摘要的文件级 diff（§5.4）。 */

@@ -53,6 +53,10 @@ export interface ToolContext {
    */
   allowedSceneId?: string;
   allowedFormat?: string;
+  /** organize 局部/整体返修的写入资源边界。缺省 = 首次整理，可写全项目草稿/设定。 */
+  allowedOrganizeNodeIds?: Set<string>;
+  allowedOrganizeAssetIds?: Set<string>;
+  allowOrganizeCreate?: boolean;
 }
 
 /** 工具规格 */

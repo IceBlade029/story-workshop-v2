@@ -30,3 +30,17 @@ export function viewEvidence(sceneId: string, hash: string): EvidenceRef {
 export function matchesQuery(haystack: string, query: string): boolean {
   return haystack.toLowerCase().includes(query.toLowerCase());
 }
+
+/** 大正文工具的确定性分段，防止一次读取把 organize 工具循环上下文塞满。 */
+export function sliceToolContent(content: string, start = 0, maxChars = 40_000): {
+  content: string;
+  range: { start: number; end: number; total: number; hasMore: boolean };
+} {
+  const safeStart = Math.max(0, Math.min(Math.floor(start), content.length));
+  const safeMax = Math.max(1_000, Math.min(Math.floor(maxChars), 100_000));
+  const end = Math.min(content.length, safeStart + safeMax);
+  return {
+    content: content.slice(safeStart, end),
+    range: { start: safeStart, end, total: content.length, hasMore: end < content.length },
+  };
+}

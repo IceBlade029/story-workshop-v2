@@ -30,6 +30,14 @@ export interface RunSummaryPayload {
   taskKind: TaskKind;
   snapshotId: string;
   scope: string;
+  instruction?: string;
+  sourceMessageIds?: string[];
+  sourceAttachmentIds?: string[];
+  rootRunId?: string;
+  parentRunId?: string;
+  revisionMode?: 'local' | 'global';
+  revisionTargets?: string[];
+  finalAnswer?: string;
   changes: ChangeItem[];
 }
 
@@ -40,11 +48,33 @@ export function persistRunSummary(workspace: ProjectWorkspace, payload: RunSumma
     taskKind: payload.taskKind,
     snapshotId: payload.snapshotId,
     scope: payload.scope,
+    instruction: payload.instruction,
+    sourceMessageIds: payload.sourceMessageIds,
+    sourceAttachmentIds: payload.sourceAttachmentIds,
+    rootRunId: payload.rootRunId ?? payload.runId,
+    parentRunId: payload.parentRunId,
+    revisionMode: payload.revisionMode,
+    revisionTargets: payload.revisionTargets,
+    reviewStatus: 'pending',
+    finalAnswer: payload.finalAnswer,
     changes: payload.changes,
   };
   writeJsonFile(
     path.join(workspace.dir, 'snapshots', payload.runId, 'summary.json'),
     summary,
+  );
+}
+
+export function updateRunReviewStatus(
+  workspace: ProjectWorkspace,
+  runId: string,
+  reviewStatus: NonNullable<RunSummary['reviewStatus']>,
+): void {
+  const summary = readRunSummary(workspace, runId);
+  if (!summary) throw new Error(`RUN_SUMMARY_NOT_FOUND: ${runId}`);
+  writeJsonFile(
+    path.join(workspace.dir, 'snapshots', runId, 'summary.json'),
+    { ...summary, reviewStatus },
   );
 }
 

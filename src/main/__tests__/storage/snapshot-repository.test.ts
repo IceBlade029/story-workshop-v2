@@ -75,6 +75,23 @@ describe('snapshot-repository', () => {
     expect(() => snap.restoreSnapshot('run_ghost')).toThrow('SNAPSHOT_NOT_FOUND');
   });
 
+  it('captureAfterState 冻结写后状态，并用全项目 hash 门禁检测后续冲突', () => {
+    const { snap, projectDir } = makeSnapshot();
+    const outline = new OutlineRepository(projectDir);
+    outline.createNode('overview', { id: 'v1', type: 'volume', title: 'V1', children: [] });
+    outline.writeDraft('v1', '写前');
+    snap.createSnapshot('run_after', [path.join(projectDir, 'outline.json'), path.join(projectDir, 'nodes', 'v1.draft.md')]);
+
+    outline.writeDraft('v1', '写后');
+    snap.captureAfterState('run_after');
+    expect(snap.readCapturedFile('run_after', 'after', 'nodes/v1.draft.md')).toBe('写后');
+    expect(snap.matchesCurrentAfterState('run_after')).toBe(true);
+
+    outline.writeDraft('v1', '后来手改');
+    expect(snap.matchesCurrentAfterState('run_after')).toBe(false);
+    expect(snap.readCapturedFile('run_after', 'after', 'nodes/v1.draft.md')).toBe('写后');
+  });
+
   it('deleteSnapshot 删除快照目录', () => {
     const { snap } = makeSnapshot();
     snap.createSnapshot('run_del', []);

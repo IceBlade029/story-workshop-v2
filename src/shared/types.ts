@@ -192,6 +192,16 @@ export function assetTypeLabel(type: string): string {
 export interface ConversationMeta {
   /** 整理光标：之后的消息 = 未整理内容（跨会话全局，§3.2） */
   lastOrganizedMessageId?: string;
+  /**
+   * 已整理来源凭据。任意范围选择后，单一光标无法表达中间被剔除的消息，
+   * 因此以 messageId + 内容 hash 作为真实覆盖记录；光标仅保留为兼容/展示字段。
+   */
+  organizedMessages?: Array<{
+    messageId: string;
+    contentHash: string;
+    runId: string;
+    organizedAt: string;
+  }>;
   /** 活动路径末端（消息树） */
   activeMessageId?: string;
   /** 当前活动会话（ChatGPT 式对话，ux-review §4.5） */
@@ -245,6 +255,20 @@ export interface RunSummary {
   snapshotId: string;
   /** 本次依据的人话描述 */
   scope: string;
+  /** 作者在整理前或返修时给出的自然语言要求。 */
+  instruction?: string;
+  /** 首次整理实际消化的来源，返修沿用根运行来源。 */
+  sourceMessageIds?: string[];
+  sourceAttachmentIds?: string[];
+  /** 返修版本链；首次整理没有 parentRunId，rootRunId = 自身。 */
+  rootRunId?: string;
+  parentRunId?: string;
+  revisionMode?: 'local' | 'global';
+  revisionTargets?: string[];
+  /** 审阅状态；旧记录缺省按 pending 展示。 */
+  reviewStatus?: 'pending' | 'accepted' | 'rolled_back';
+  /** organize 不进对话日志，审阅页重启后从摘要恢复这段最终总结。 */
+  finalAnswer?: string;
   /** 逐个变更 */
   changes: ChangeItem[];
 }

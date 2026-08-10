@@ -14,7 +14,7 @@ import { OutlineRepository, OVERVIEW_ROOT_ID } from './storage/outline-repositor
 import { VisibleViewService } from './storage/visible-view-service';
 import { FormatTemplateRepository } from './agent-runtime/templates';
 import { createAgentRuntime, type AgentRuntime } from './agent-runtime/agent-factory';
-import { acceptRun, rollbackRun, readRunSummary, readRunRecord } from './agent-runtime/run-recorder';
+import { acceptRun, rollbackRun, readRunSummary, readRunRecord, updateRunReviewStatus } from './agent-runtime/run-recorder';
 import { TASK_DEFINITIONS } from './agent-runtime/task-definitions';
 import {
   CONTEXT_BUDGET_TOKENS,
@@ -32,7 +32,7 @@ import { saveApiKey, hasApiKey, loadApiKeyEntry } from './api-key-store';
 import { getSettings, saveSettings } from './settings-store';
 import type { AppSettings } from '../shared/llm-types';
 import type { ModelAdapter } from './agent-runtime/model-types';
-import type { RunResult, RunRequest } from './agent-runtime/run-loop';
+import { ORGANIZE_MAX_OUTPUT_TOKENS, type RunResult, type RunRequest } from './agent-runtime/run-loop';
 import type { ChangeItem, ChatMessage, Attachment, NodeType, OutlineNode, ToolCallTrace, VisibleView, ConversationSession } from '../shared/types';
 import type {
   CommitResult,
@@ -383,6 +383,7 @@ export class AppService {
     const tree = ws.outline.readTree();
     const messages = ws.conversation.readMessagesWithTree();
     const runSummaries = AppService.collectRunSummaries(ws);
+    const organizedMessages = ws.conversation.getOrganizedMessages();
     const keyEntry = loadApiKeyEntry('deepseek');
     return {
       dir: ws.dir,
@@ -396,6 +397,7 @@ export class AppService {
       activeSessionId: ws.conversation.getActiveSessionId(),
       activeMessageId: ws.conversation.getActiveMessageId(),
       organizeCursor: ws.conversation.getOrganizeCursor(),
+      ...(organizedMessages ? { organizedMessages } : {}),
       runSummaries,
       hasApiKey: hasApiKey('deepseek'),
       maskedApiKey: keyEntry?.maskedKey,
@@ -932,20 +934,104 @@ export class AppService {
 
   // -------------------------------------------------------------- run
 
-  /** 组装 organize 范围（ux-review §4.2：范围 = 未整理 / 全部 + 自然语言附注）。 */
-  private resolveOrganizeScope(scope: OrganizeScope): { messages: ChatMessage[]; scopeText: string } {
+  /** 组装 organize 范围：默认未整理、全部历史或用户明确勾选的消息/附件。 */
+  private resolveOrganizeScope(scope: OrganizeScope): {
+    messages: ChatMessage[];
+    messageIds: string[];
+    attachmentIds: string[];
+    scopeText: string;
+  } {
     const conv = this.workspace.conversation;
+    const attachmentIdsFrom = (messages: ChatMessage[]): string[] => [...new Set(
+      messages.flatMap((m) => m.refs?.attachmentIds ?? []),
+    )];
     if (scope.type === 'unorganized') {
       const messages = conv.readUnorganizedMessages();
       const cursor = conv.getOrganizeCursor();
       const scopeText = cursor
         ? `第 ${conv.readActivePath().findIndex((m) => m.id === cursor) + 1}–${conv.readActivePath().length} 轮未整理对话（光标：#${cursor}）`
         : `全部未整理对话（无光标）`;
-      return { messages, scopeText };
+      return { messages, messageIds: messages.map((m) => m.id), attachmentIds: attachmentIdsFrom(messages), scopeText };
     }
-    // 'all'：重新整理全部对话
-    const messages = conv.readMessages();
-    return { messages, scopeText: '重新整理全部对话（全部历史）' };
+    if (scope.type === 'all') {
+      const messages = conv.readMessages().filter((m) => m.role !== 'system');
+      return {
+        messages,
+        messageIds: messages.map((m) => m.id),
+        attachmentIds: attachmentIdsFrom(messages),
+        scopeText: '重新整理全部对话（全部历史）',
+      };
+    }
+
+    const selectedMessageIds = new Set(scope.messageIds);
+    const messages = conv.readMessages().filter((m) => m.role !== 'system' && selectedMessageIds.has(m.id));
+    const existingMessageIds = new Set(messages.map((m) => m.id));
+    const missingMessageIds = [...selectedMessageIds].filter((id) => !existingMessageIds.has(id));
+    if (missingMessageIds.length > 0) throw new Error(`ORGANIZE_MESSAGE_NOT_FOUND: ${missingMessageIds.join(', ')}`);
+
+    const knownAttachments = new Set(this.workspace.attachments.listAttachments().map((a) => a.id));
+    const attachmentIds = [...new Set(scope.attachmentIds)];
+    const missingAttachmentIds = attachmentIds.filter((id) => !knownAttachments.has(id));
+    if (missingAttachmentIds.length > 0) throw new Error(`ORGANIZE_ATTACHMENT_NOT_FOUND: ${missingAttachmentIds.join(', ')}`);
+    return {
+      messages,
+      messageIds: messages.map((m) => m.id),
+      attachmentIds,
+      scopeText: `手动选择：${messages.length} 条消息、${attachmentIds.length} 个附件`,
+    };
+  }
+
+  /**
+   * 只把用户勾选的附件带入 organize。消息内被剔除的附件引用不内联；
+   * 独立追加的附件用一条仅存在于本次模型输入中的合成消息承载。
+   */
+  private prepareOrganizeMessages(messages: ChatMessage[], attachmentIds: string[]): ChatMessage[] {
+    const selected = new Set(attachmentIds);
+    const referenced = new Set<string>();
+    const filtered = messages.map((message) => {
+      const ids = (message.refs?.attachmentIds ?? []).filter((id) => selected.has(id));
+      for (const id of ids) referenced.add(id);
+      if (!message.refs) return message;
+      return {
+        ...message,
+        refs: { ...message.refs, attachmentIds: ids },
+      };
+    });
+    const extra = attachmentIds.filter((id) => !referenced.has(id));
+    if (extra.length > 0) {
+      filtered.push({
+        id: 'organize-selected-attachments',
+        role: 'user',
+        content: '以下附件由作者手动加入本次整理范围。',
+        timestamp: new Date().toISOString(),
+        refs: { attachmentIds: extra },
+      });
+    }
+    return this.prepareModelMessages(filtered);
+  }
+
+  private organizeRevisionWriteScope(
+    rootRunId: string,
+    mode: 'local' | 'global',
+    targetRefs: string[],
+  ): { nodeIds: Set<string>; assetIds: Set<string>; allowCreate: boolean } {
+    const summaries = AppService.collectRunSummaries(this.workspace)
+      .filter((summary) => (summary.rootRunId ?? summary.runId) === rootRunId && summary.reviewStatus !== 'rolled_back');
+    const allowedRefs = new Set<string>();
+    for (const summary of summaries) {
+      for (const change of summary.changes) {
+        if ('nodeId' in change) allowedRefs.add(`node:${change.nodeId}`);
+        if ('assetId' in change) allowedRefs.add(`asset:${change.assetId}`);
+      }
+    }
+    const requested = mode === 'global' ? [...allowedRefs] : [...new Set(targetRefs)];
+    const invalid = requested.filter((ref) => !allowedRefs.has(ref));
+    if (invalid.length > 0) throw new Error(`ORGANIZE_REVISION_TARGET_OUT_OF_SCOPE: ${invalid.join(', ')}`);
+    return {
+      nodeIds: new Set(requested.filter((r) => r.startsWith('node:')).map((r) => r.slice(5))),
+      assetIds: new Set(requested.filter((r) => r.startsWith('asset:')).map((r) => r.slice(6))),
+      allowCreate: mode === 'global',
+    };
   }
 
   /** 启动一次 run（chat / organize），返回结果；无内容可整理时 skippedReason。 */
@@ -959,16 +1045,53 @@ export class AppService {
     if (this.isActiveSessionArchived()) throw new Error('SESSION_ARCHIVED');
 
     let request: RunRequest;
+    let organizeSource: { messageIds: string[]; attachmentIds: string[] } | null = null;
     if (req.kind === 'organize') {
-      const { messages, scopeText } = this.resolveOrganizeScope(req.scope ?? { type: 'unorganized' });
-      if (messages.length === 0) {
+      let requestedScope = req.scope ?? { type: 'unorganized' } as OrganizeScope;
+      let revisionMeta: RunRequest['organizeRevision'];
+      let organizeWriteScope: RunRequest['organizeWriteScope'];
+      if (req.revision) {
+        const parent = readRunSummary(ws, req.revision.parentRunId);
+        if (!parent || parent.taskKind !== 'organize') throw new Error(`ORGANIZE_RUN_NOT_FOUND: ${req.revision.parentRunId}`);
+        if (parent.reviewStatus && parent.reviewStatus !== 'pending') {
+          throw new Error(`ORGANIZE_REVIEW_CLOSED: ${parent.reviewStatus}`);
+        }
+        const rootRunId = parent.rootRunId ?? parent.runId;
+        const latestPending = AppService.collectRunSummaries(ws)
+          .filter((summary) => (summary.rootRunId ?? summary.runId) === rootRunId && (summary.reviewStatus ?? 'pending') === 'pending')
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .at(-1);
+        if (latestPending?.runId !== parent.runId) throw new Error('ORGANIZE_REVISION_NOT_LATEST: 只能从最新审阅版本继续返修');
+        const root = readRunSummary(ws, rootRunId) ?? parent;
+        requestedScope = {
+          type: 'selection',
+          messageIds: root.sourceMessageIds ?? [],
+          attachmentIds: root.sourceAttachmentIds ?? [],
+        };
+        revisionMeta = {
+          rootRunId,
+          parentRunId: parent.runId,
+          mode: req.revision.mode,
+          targetRefs: req.revision.targetRefs,
+        };
+        organizeWriteScope = this.organizeRevisionWriteScope(rootRunId, req.revision.mode, req.revision.targetRefs);
+      }
+      const { messages, messageIds, attachmentIds, scopeText } = this.resolveOrganizeScope(requestedScope);
+      if (messages.length === 0 && attachmentIds.length === 0) {
         return { runId: '', taskKind: 'organize', finalAnswer: '', turns: 0, toolCallCount: 0, writeToolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, changes: [], cancelled: false, skippedReason: '没有未整理的内容' };
       }
+      organizeSource = { messageIds, attachmentIds };
       request = {
         taskKind: 'organize',
-        // Part 5：范围消息同样内联附件正文，organize 首轮即可读取
-        messages: this.prepareModelMessages(messages),
-        scope: scopeText + (req.note ? `；附注：${req.note}` : ''),
+        messages: this.prepareOrganizeMessages(messages, attachmentIds),
+        scope: revisionMeta
+          ? `${scopeText}；返修模式：${revisionMeta.mode === 'local' ? '局部' : '整体'}；目标：${revisionMeta.targetRefs.join('、') || '本次全部结果'}`
+          : scopeText + (req.note ? `；附注：${req.note}` : ''),
+        instruction: req.revision?.feedback ?? req.note,
+        sourceMessageIds: messageIds,
+        sourceAttachmentIds: attachmentIds,
+        organizeRevision: revisionMeta,
+        organizeWriteScope,
       };
     } else {
       // §7.2 上下文组装：压缩摘要（沿活动路径）+ 最近几轮原文 + 当前输入
@@ -991,31 +1114,35 @@ export class AppService {
       ...request,
       signal,
       // 全局「最大输出长度」设置（长文评价被截断时可调大）
-      maxOutputTokens: getSettings().maxOutputTokens,
+      maxOutputTokens: req.kind === 'organize'
+        ? Math.max(getSettings().maxOutputTokens, ORGANIZE_MAX_OUTPUT_TOKENS)
+        : getSettings().maxOutputTokens,
       onChunk: hooks.onChunk,
       onReasoning: hooks.onReasoning,
       onSearchStatus: hooks.onSearchStatus,
       onToolTrace: hooks.onToolTrace,
     });
+    // 返修是对已审阅结果的定向修正。失败/取消不能把半成品留成当前版本：
+    // after 已由 run-loop 冻结供诊断，这里自动恢复到返修前快照。
+    if (req.kind === 'organize' && req.revision && (result.error || result.cancelled) && result.snapshotId) {
+      rollbackRun(ws, result.runId);
+      updateRunReviewStatus(ws, result.runId, 'rolled_back');
+    }
     // AI 写入（organize 的 write_draft）后同步可见视图新鲜度（§6.3 自动重生成）
     this.syncVisibleViews();
+    // run-loop 先冻结工具写入结果；可见视图同步也是本次写入的派生结果，
+    // 成功运行及保留部分写入的首次整理需在同步后刷新最终 after 快照。
+    if (result.snapshotId && !(req.kind === 'organize' && req.revision && (result.error || result.cancelled))) {
+      ws.snapshots.captureAfterState(result.runId);
+    }
     // 快照保留策略（§12.1 决定：保留全部 commit，运行快照最多 50 个）
     ws.snapshots.pruneRetention();
     // §4.3：整理范围消化过的附件记录所用 hash（附件后变 → 附件行提示「已更新」）
-    if (req.kind === 'organize' && !result.error && !result.cancelled) {
-      // 整理成功（含硬门禁通过）→ 光标推进到范围最后一条消息（§5.3；
-      // organize 沙箱化后日志零新增，光标不再指向运行结束事件）
-      const scopeTail = request.messages.at(-1)?.id;
-      if (scopeTail) ws.conversation.setOrganizeCursor(scopeTail);
-      const marked = new Set<string>();
-      for (const m of request.messages) {
-        for (const id of m.refs?.attachmentIds ?? []) {
-          if (!marked.has(id)) {
-            marked.add(id);
-            ws.attachments.markStructured(id, result.runId);
-          }
-        }
-      }
+    if (req.kind === 'organize' && !req.revision && !result.error && !result.cancelled) {
+      // 任意范围成功后按 ID+hash 记录真实覆盖；光标只派生连续前缀，避免
+      // 中间被剔除的消息被误判为已整理。
+      ws.conversation.markMessagesOrganized(organizeSource?.messageIds ?? [], result.runId);
+      for (const id of organizeSource?.attachmentIds ?? []) ws.attachments.markStructured(id, result.runId);
     }
     // 用户反馈 2：首个对话 run 完成后自动命名会话标题（ChatGPT/DeepSeek 式）；
     // 命名失败静默保留「话题 N」占位，下次 chat run 自动重试。
@@ -1508,8 +1635,8 @@ export class AppService {
     const fs = require('fs') as typeof import('fs');
     const manifest = ws.snapshots.readManifest(runId);
     if (!manifest) throw new Error(`SNAPSHOT_NOT_FOUND: ${runId}`);
+    const afterManifest = ws.snapshots.readAfterManifest(runId);
     const out: Array<{ path: string; before: string | null; after: string | null }> = [];
-    const seen = new Set<string>();
 
     const readFile = (file: string): string | null => {
       try {
@@ -1519,51 +1646,79 @@ export class AppService {
       }
     };
 
-    // 1) 快照中的文件（修改 / 删除）
-    for (const rel of manifest.files) {
+    // 新运行使用冻结的 after 状态；旧快照没有 after 时兼容回退当前工作区。
+    const candidates = new Set<string>([
+      ...manifest.files,
+      ...(afterManifest?.files ?? []),
+    ]);
+    for (const rel of candidates) {
       if (!/^(nodes|world)\/.*\.md$/.test(rel)) continue;
-      seen.add(rel);
-      const before = readFile(path.join(ws.dir, 'snapshots', runId, ...rel.split('/')));
-      const after = readFile(path.join(ws.dir, ...rel.split('/')));
+      const before = manifest.files.includes(rel) ? ws.snapshots.readCapturedFile(runId, 'before', rel) : null;
+      const after = afterManifest
+        ? (afterManifest.files.includes(rel) ? ws.snapshots.readCapturedFile(runId, 'after', rel) : null)
+        : readFile(path.join(ws.dir, ...rel.split('/')));
       if (before === after) continue;
       out.push({ path: rel, before, after });
     }
-
-    // 2) 运行期间新建的文件：覆盖目录中、快照时刻不存在的 .md（node_created / asset_created）
-    const scan = (dir: string): string[] => {
-      const fullDir = path.join(ws.dir, dir);
-      const result: string[] = [];
-      try {
-        for (const entry of fs.readdirSync(fullDir, { withFileTypes: true })) {
-          if (entry.isDirectory()) {
-            result.push(...scan(`${dir}/${entry.name}`));
-          } else if (entry.name.endsWith('.md')) {
-            result.push(`${dir}/${entry.name}`);
+    if (!afterManifest) {
+      // 旧项目快照没有冻结 after：保留原来的“扫描当前目录中新文件”兼容路径。
+      const scan = (dir: string): string[] => {
+        const fullDir = path.join(ws.dir, dir);
+        const result: string[] = [];
+        try {
+          for (const entry of fs.readdirSync(fullDir, { withFileTypes: true })) {
+            if (entry.isDirectory()) result.push(...scan(`${dir}/${entry.name}`));
+            else if (entry.name.endsWith('.md')) result.push(`${dir}/${entry.name}`);
           }
+        } catch {
+          /* 目录不存在 */
         }
-      } catch {
-        /* 目录不存在 */
-      }
-      return result;
-    };
-    const preExisting = new Set(manifest.preExistingFiles ?? []);
-    for (const dir of (manifest.dirs ?? []).filter((d) => d === 'nodes' || d === 'world')) {
-      for (const rel of scan(dir)) {
-        if (preExisting.has(rel) || seen.has(rel)) continue;
-        const after = readFile(path.join(ws.dir, ...rel.split('/')));
-        if (after !== null) out.push({ path: rel, before: null, after });
+        return result;
+      };
+      const preExisting = new Set(manifest.preExistingFiles ?? []);
+      for (const dir of (manifest.dirs ?? []).filter((d) => d === 'nodes' || d === 'world')) {
+        for (const rel of scan(dir)) {
+          if (preExisting.has(rel) || candidates.has(rel)) continue;
+          const after = readFile(path.join(ws.dir, ...rel.split('/')));
+          if (after !== null) out.push({ path: rel, before: null, after });
+        }
       }
     }
     return out;
   }
 
   acceptRun(runId: string): ProjectState {
-    acceptRun(this.workspace, runId);
+    const selected = readRunSummary(this.workspace, runId);
+    if (!selected || selected.taskKind !== 'organize') {
+      acceptRun(this.workspace, runId);
+      return this.getState();
+    }
+    const rootRunId = selected.rootRunId ?? selected.runId;
+    const chain = AppService.collectRunSummaries(this.workspace)
+      .filter((summary) => (summary.rootRunId ?? summary.runId) === rootRunId);
+    for (const summary of chain) {
+      acceptRun(this.workspace, summary.runId);
+      updateRunReviewStatus(this.workspace, summary.runId, 'accepted');
+    }
     return this.getState();
   }
 
   rollbackRun(runId: string): ProjectState {
-    rollbackRun(this.workspace, runId);
+    const selected = readRunSummary(this.workspace, runId);
+    if (!selected || selected.taskKind !== 'organize') {
+      rollbackRun(this.workspace, runId);
+      return this.getState();
+    }
+    const rootRunId = selected.rootRunId ?? selected.runId;
+    const chain = AppService.collectRunSummaries(this.workspace)
+      .filter((summary) => (summary.rootRunId ?? summary.runId) === rootRunId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const latest = chain.at(-1);
+    if (!latest || !this.workspace.snapshots.matchesCurrentAfterState(latest.runId)) {
+      throw new Error('ROLLBACK_CONFLICT: 整理后项目内容已发生其他修改，为避免覆盖后续工作，不能自动回滚。请先审阅当前差异或手动恢复。');
+    }
+    rollbackRun(this.workspace, rootRunId);
+    for (const summary of chain) updateRunReviewStatus(this.workspace, summary.runId, 'rolled_back');
     return this.getState();
   }
 

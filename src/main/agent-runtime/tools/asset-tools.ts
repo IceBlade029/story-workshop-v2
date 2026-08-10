@@ -5,7 +5,7 @@
 import type { ToolSpec } from '../tool-types';
 import { AssetRepository } from '../../storage/asset-repository';
 import { sha256 } from '../../storage/hash';
-import { ok, fail, assetEvidence } from './tool-utils';
+import { ok, fail, assetEvidence, sliceToolContent } from './tool-utils';
 
 export function makeAssetReadTools(projectDir: () => string): ToolSpec[] {
   const assets = () => new AssetRepository(projectDir());
@@ -41,28 +41,33 @@ export function makeAssetReadTools(projectDir: () => string): ToolSpec[] {
 
     {
       name: 'read_asset',
-      description: '读取单个设定的完整内容（markdown 自由格式）。',
+      description: '分段读取单个设定内容（markdown 自由格式）。默认最多 40000 字。',
       inputSchema: {
         type: 'object',
         properties: {
           assetId: { type: 'string', description: '设定 id' },
+          start: { type: 'number', description: '起始字符位置（缺省 0）' },
+          maxChars: { type: 'number', description: '本段最大字符数（缺省 40000，最高 100000）' },
         },
         required: ['assetId'],
       } as never,
       outputSchema: {} as never,
-      async execute(_ctx, args: { assetId: string }) {
+      async execute(_ctx, args: { assetId: string; start?: number; maxChars?: number }) {
         const asset = assets().readAsset(args.assetId);
         if (!asset) return fail('ASSET_NOT_FOUND', `设定不存在: ${args.assetId}`);
+        const sliced = sliceToolContent(asset.content, args.start, args.maxChars);
         return ok(
           {
             id: asset.id,
             type: asset.type,
             title: asset.title,
-            content: asset.content,
+            content: sliced.content,
+            range: sliced.range,
             hash: sha256(asset.content),
             updatedAt: asset.updatedAt,
           },
-          [assetEvidence(asset.id, sha256(asset.content), asset.content.slice(0, 200))],
+          [assetEvidence(asset.id, sha256(asset.content), sliced.content.slice(0, 200))],
+          sliced.range.hasMore,
         );
       },
     },

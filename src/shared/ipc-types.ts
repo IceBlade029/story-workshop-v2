@@ -9,6 +9,7 @@ import type {
   Attachment,
   ChangeItem,
   ChatMessage,
+  ConversationMeta,
   ConversationSession,
   NodeType,
   OutlineTree,
@@ -162,6 +163,8 @@ export interface ProjectState {
   activeSessionId?: string;
   activeMessageId?: string;
   organizeCursor?: string;
+  /** 消息级整理覆盖记录；渲染层据此派生真正的未整理范围。 */
+  organizedMessages?: NonNullable<ConversationMeta['organizedMessages']>;
   runSummaries: RunSummaryEntry[];
   hasApiKey: boolean;
   maskedApiKey?: string;
@@ -182,7 +185,14 @@ export type RunSummaryEntry = RunSummary & { createdAt: string };
 
 export type OrganizeScope =
   | { type: 'unorganized' }
-  | { type: 'all' };
+  | { type: 'all' }
+  | {
+      type: 'selection';
+      /** 明确选中的非 system 消息；按日志/活动路径原顺序组装。 */
+      messageIds: string[];
+      /** 明确选中的附件；可独立于消息引用追加或剔除。 */
+      attachmentIds: string[];
+    };
 
 /** run:start 请求 */
 export interface RunStartRequest {
@@ -193,6 +203,13 @@ export interface RunStartRequest {
   scope?: OrganizeScope;
   /** 附带说明（追加到范围描述，可选） */
   note?: string;
+  /** 对既有整理结果发起返修；仍属于 organize 可写沙箱，不进入讨论上下文。 */
+  revision?: {
+    parentRunId: string;
+    mode: 'local' | 'global';
+    targetRefs: string[];
+    feedback: string;
+  };
   /** 本次回答详略档位（聊天工具栏每次发送可选；缺省 = auto） */
   answerDetail?: AnswerDetail;
 }

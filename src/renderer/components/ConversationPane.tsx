@@ -7,7 +7,7 @@
  */
 import React, { useEffect, useRef } from 'react';
 import { store, useStore, LONG_TEXT_THRESHOLD } from '../store';
-import { confirmDialog } from './ui/dialog';
+import { confirmDialog, promptDialog } from './ui/dialog';
 import { MarkdownView } from './ui/MarkdownView';
 import { DiffView } from './ui/DiffView';
 import { CallInspectionDialog } from './ui/CallInspectionDialog';
@@ -128,12 +128,23 @@ function VersionNav({ message }: { message: ChatMessage }): React.ReactElement |
 
 // --------------------------------------------------------------------------- 变更详情（organize 总结消息内展开，ux-review §4.2：Cline 式）
 
-export function OrganizeChangesExpand({ runId }: { runId: string }): React.ReactElement {
+export function OrganizeChangesExpand({ runId, readOnly = false }: { runId: string; readOnly?: boolean }): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [changes, setChanges] = React.useState<Array<import('../../shared/types').ChangeItem> | null>(null);
+  const [summary, setSummary] = React.useState<import('../../shared/ipc-types').RunSummaryEntry | null>(null);
   const [diffs, setDiffs] = React.useState<import('../../shared/ipc-types').FileDiff[] | null>(null);
   const [diffOpen, setDiffOpen] = React.useState(false);
   const [accepted, setAccepted] = React.useState(false);
+  const [selectedRefs, setSelectedRefs] = React.useState<Set<string>>(new Set());
+  React.useEffect(() => {
+    setOpen(false);
+    setChanges(null);
+    setSummary(null);
+    setDiffs(null);
+    setDiffOpen(false);
+    setAccepted(false);
+    setSelectedRefs(new Set());
+  }, [runId]);
 
   const toggle = async (): Promise<void> => {
     // 展开-收起 toggle（§4.2）：已展开 → 收起；未展开 → 懒加载后展开
@@ -145,6 +156,7 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
       try {
         const runs = await store.listRuns();
         const entry = runs.find((r) => r.runId === runId);
+        setSummary(entry ?? null);
         setChanges(entry?.changes ?? []);
       } catch {
         return;
@@ -185,6 +197,32 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
     store.jumpTo('node', nodeId);
   };
 
+  const changeRef = (c: import('../../shared/types').ChangeItem): string =>
+    'nodeId' in c ? `node:${c.nodeId}` : `asset:${c.assetId}`;
+
+  const requestRevision = async (mode: 'local' | 'global'): Promise<void> => {
+    if (!summary?.sourceMessageIds && !summary?.sourceAttachmentIds) {
+      store.showToast('该历史整理记录没有保存精确来源，不能安全返修；请重新选择范围发起整理', 'info');
+      return;
+    }
+    const targetRefs = mode === 'local' ? [...selectedRefs] : [];
+    if (mode === 'local' && targetRefs.length === 0) {
+      store.showToast('请先勾选要局部修改的结果', 'info');
+      return;
+    }
+    const feedback = await promptDialog({
+      title: mode === 'local' ? '局部修改所选结果' : '整体调整本次整理',
+      message: mode === 'local'
+        ? `只允许修改已选择的 ${targetRefs.length} 个节点/设定；其他整理结果保持不变。`
+        : '反馈将作用于本次整理结果整体，不会进入普通讨论上下文。',
+      placeholder: '用自然语言说明需要怎样修改…',
+      confirmText: '开始返修',
+    });
+    if (!feedback?.trim()) return;
+    void store.reviseOrganize(runId, mode, targetRefs, feedback)
+      .catch((err) => store.showToast((err as Error).message, 'error'));
+  };
+
   return (
     <div className="organize-changes">
       <button className="tiny-btn" onClick={() => void toggle()}>
@@ -192,10 +230,31 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
       </button>
       {open && changes !== null && (
         <div className="changes-block">
+          {summary && (
+            <div className="organize-review-meta">
+              <div><strong>范围：</strong>{summary.scope}</div>
+              {summary.instruction && <div><strong>作者要求：</strong>{summary.instruction}</div>}
+              <div className="muted small">
+                直接来源：{summary.sourceMessageIds?.length ?? 0} 条消息、{summary.sourceAttachmentIds?.length ?? 0} 个附件
+                {summary.revisionMode ? ` · ${summary.revisionMode === 'local' ? '局部返修' : '整体返修'}` : ''}
+              </div>
+            </div>
+          )}
           {changes.length === 0 && <p className="muted small">无结构变更。</p>}
           <ul className="changes">
             {changes.map((c, i) => (
               <li key={i}>
+                <input
+                  type="checkbox"
+                  aria-label={`选择变更 ${i + 1}`}
+                  checked={selectedRefs.has(changeRef(c))}
+                  onChange={() => setSelectedRefs((current) => {
+                    const next = new Set(current);
+                    const ref = changeRef(c);
+                    if (next.has(ref)) next.delete(ref); else next.add(ref);
+                    return next;
+                  })}
+                />
                 {changeText(c)}
                 {c.action === 'node_created' && (
                   <button className="tiny-btn" onClick={() => jumpNode(c.nodeId)} title="右栏查看该节点">打开</button>
@@ -208,22 +267,28 @@ export function OrganizeChangesExpand({ runId }: { runId: string }): React.React
           </ul>
           <div className="row">
             <button className="tiny-btn" onClick={() => void toggleDiffs()}>{diffOpen ? '收起 diff' : '查看 diff'}</button>
-            <button
-              className="tiny-btn"
-              disabled={accepted}
-              onClick={() => { void store.acceptRun(runId); setAccepted(true); store.showToast('已接受', 'success'); }}
-            >
-              {accepted ? '已接受' : '接受（清除 AI 标记）'}
-            </button>
-            <button
-              className="tiny-btn"
-              onClick={async () => {
-                const ok = await confirmDialog({ title: '回滚该次运行的全部改动？', message: '从快照恢复受影响文件（§5.4 整体可回滚）。', confirmText: '回滚', danger: true });
-                if (ok) void store.rollbackRun(runId);
-              }}
-            >
-              回滚
-            </button>
+            {!readOnly && (
+              <>
+                <button className="tiny-btn" disabled={selectedRefs.size === 0 || (!summary?.sourceMessageIds && !summary?.sourceAttachmentIds)} onClick={() => void requestRevision('local')}>修改选中</button>
+                <button className="tiny-btn" disabled={!summary?.sourceMessageIds && !summary?.sourceAttachmentIds} onClick={() => void requestRevision('global')}>整体调整</button>
+                <button
+                  className="tiny-btn"
+                  disabled={accepted}
+                  onClick={() => { void store.acceptRun(runId); setAccepted(true); store.showToast('已接受', 'success'); }}
+                >
+                  {accepted ? '已接受' : '接受（清除 AI 标记）'}
+                </button>
+                <button
+                  className="tiny-btn"
+                  onClick={async () => {
+                    const ok = await confirmDialog({ title: '回滚该次运行的全部改动？', message: '从快照恢复受影响文件（§5.4 整体可回滚）。', confirmText: '回滚', danger: true });
+                    if (ok) void store.rollbackRun(runId);
+                  }}
+                >
+                  回滚
+                </button>
+              </>
+            )}
           </div>
           {diffOpen && diffs !== null && <DiffView diffs={diffs} />}
         </div>
@@ -740,7 +805,7 @@ export function ContextUsageMeter(): React.ReactElement {
   );
 }
 
-function InputBar(): React.ReactElement {
+function InputBar({ onOrganize }: { onOrganize: () => void }): React.ReactElement {
   const inputText = useStore((s) => s.inputText);
   const running = useStore((s) => s.activeRun?.status === 'running');
   const project = useStore((s) => s.project);
@@ -826,8 +891,8 @@ function InputBar(): React.ReactElement {
         {!running && (
           <button
             className="small-btn organize-btn"
-            onClick={() => void store.organize().catch((err) => store.showToast((err as Error).message, 'error'))}
-            title="消化整理光标之后的未整理内容（§4.2：无计数，无催促感）"
+            onClick={onOrganize}
+            title="查看并调整本次整理范围与要求"
           >
             整理
           </button>
@@ -871,21 +936,55 @@ function OrganizeDetailPanel({ onClose }: { onClose: () => void }): React.ReactE
   const project = useStore((s) => s.project);
   const path = useStore((s) => s.activePath);
   const [note, setNote] = React.useState('');
-  const cursor = project?.organizeCursor;
-  // 消息起止范围（从整理光标到活动路径末端）
-  const cursorIdx = cursor ? path.findIndex((m) => m.id === cursor) : -1;
-  const rangeText = cursorIdx >= 0
-    ? `第 ${cursorIdx + 1}–${path.length} 轮消息（光标 #${cursor}）`
-    : '全部未整理消息（无光标）';
-  // 附件清单（范围内消息引用的附件）
-  const attachmentIds = new Set<string>();
-  for (const m of path.slice(cursorIdx >= 0 ? cursorIdx + 1 : 0)) {
-    for (const id of m.refs?.attachmentIds ?? []) attachmentIds.add(id);
-  }
-  const attachments = project?.attachments.filter((a) => attachmentIds.has(a.id)) ?? [];
+  const selectableMessages = path.filter((m) => m.role !== 'system');
+  const defaultMessageIds = React.useMemo(() => {
+    if (!project) return [] as string[];
+    if (project.organizedMessages) {
+      const organized = new Set(project.organizedMessages.map((r) => r.messageId));
+      return selectableMessages.filter((m) => !organized.has(m.id)).map((m) => m.id);
+    }
+    const cursorIdx = project.organizeCursor ? path.findIndex((m) => m.id === project.organizeCursor) : -1;
+    return path.slice(cursorIdx >= 0 ? cursorIdx + 1 : 0).filter((m) => m.role !== 'system').map((m) => m.id);
+  }, [project, path]);
+  const defaultAttachmentIds = React.useMemo(() => {
+    const selected = new Set(defaultMessageIds);
+    return [...new Set(selectableMessages
+      .filter((m) => selected.has(m.id))
+      .flatMap((m) => m.refs?.attachmentIds ?? []))];
+  }, [defaultMessageIds, selectableMessages]);
+  const [messageIds, setMessageIds] = React.useState<Set<string>>(() => new Set(defaultMessageIds));
+  const [attachmentIds, setAttachmentIds] = React.useState<Set<string>>(() => new Set(defaultAttachmentIds));
+  const [messagesOpen, setMessagesOpen] = React.useState(true);
+  const [attachmentsOpen, setAttachmentsOpen] = React.useState(true);
+
+  const toggleMessage = (id: string): void => {
+    setMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleAttachment = (id: string): void => {
+    setAttachmentIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectedMessages = selectableMessages.filter((m) => messageIds.has(m.id));
+  const selectedAttachments = project?.attachments.filter((a) => attachmentIds.has(a.id)) ?? [];
+  const estimatedChars = selectedMessages.reduce((sum, m) => sum + m.content.length, 0)
+    + selectedAttachments.reduce((sum, a) => sum + Math.ceil(a.size / 2), 0);
+  const estimatedTokens = Math.ceil(estimatedChars / 1.5) + 2_000;
+  const budgetRatio = estimatedTokens / 500_000;
 
   const confirm = (): void => {
-    void store.organize('unorganized', note.trim() || undefined)
+    void store.organize({
+      type: 'selection',
+      messageIds: selectedMessages.map((m) => m.id),
+      attachmentIds: selectedAttachments.map((a) => a.id),
+    }, note.trim() || undefined)
       .catch((err) => store.showToast((err as Error).message, 'error'));
     onClose();
   };
@@ -897,26 +996,73 @@ function OrganizeDetailPanel({ onClose }: { onClose: () => void }): React.ReactE
       confirmText: '重新整理全部',
       danger: true,
     });
-    if (ok !== null) {
-      void store.organize('all').catch((err) => store.showToast((err as Error).message, 'error'));
+    if (ok) {
+      void store.organize({ type: 'all' }, note.trim() || undefined).catch((err) => store.showToast((err as Error).message, 'error'));
       onClose();
     }
   };
 
   return (
     <div className="organize-detail">
-      <div className="muted small">本次范围：{rangeText}</div>
-      {attachments.length > 0 && (
-        <div className="muted small">范围内附件：{attachments.map((a) => a.name).join('、')}</div>
-      )}
+      <div className="organize-scope-head">
+        <strong>本次整理范围</strong>
+        <span className="muted small">可展开查看、剔除或重新加入；未选内容仍保持未整理</span>
+      </div>
+      <section className="organize-scope-section">
+        <button className="organize-scope-toggle" onClick={() => setMessagesOpen(!messagesOpen)}>
+          <span>{messagesOpen ? '▼' : '▶'} 对话消息</span>
+          <span className="muted small">已选 {selectedMessages.length}/{selectableMessages.length}</span>
+        </button>
+        {messagesOpen && (
+          <div className="organize-scope-list">
+            {selectableMessages.length === 0 && <div className="muted small">当前话题没有可整理消息。</div>}
+            {selectableMessages.map((message, index) => (
+              <label className="organize-scope-item" key={message.id}>
+                <input type="checkbox" checked={messageIds.has(message.id)} onChange={() => toggleMessage(message.id)} />
+                <span className="organize-scope-item-body">
+                  <span className="small"><strong>第 {index + 1} 条 · {message.role === 'user' ? '作者' : 'AI'}</strong></span>
+                  <span className="muted small">{message.content.replace(/\s+/g, ' ').slice(0, 140) || '（空消息）'}</span>
+                  {message.content.length > 140 && <details><summary className="muted small">展开全文</summary><pre>{message.content}</pre></details>}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </section>
+      <section className="organize-scope-section">
+        <button className="organize-scope-toggle" onClick={() => setAttachmentsOpen(!attachmentsOpen)}>
+          <span>{attachmentsOpen ? '▼' : '▶'} 附件</span>
+          <span className="muted small">已选 {selectedAttachments.length}/{project?.attachments.length ?? 0}</span>
+        </button>
+        {attachmentsOpen && (
+          <div className="organize-scope-list">
+            {(project?.attachments.length ?? 0) === 0 && <div className="muted small">项目中没有附件。</div>}
+            {project?.attachments.map((attachment) => (
+              <label className="organize-scope-item" key={attachment.id}>
+                <input type="checkbox" checked={attachmentIds.has(attachment.id)} onChange={() => toggleAttachment(attachment.id)} />
+                <span className="organize-scope-item-body">
+                  <span className="small"><strong>{attachment.name}</strong></span>
+                  <span className="muted small">{attachment.size.toLocaleString()} 字节{attachment.needsRestructure ? ' · 内容已更新' : ''}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </section>
+      <div className="muted small">
+        辅助参考：整理模型可按需检索现有大纲、草稿、设定与可见视图；它实际读取的对象会保留在本次调用详情中。
+      </div>
+      <div className={`organize-budget ${budgetRatio > 1 ? 'organize-budget-warn' : ''}`}>
+        预计直接输入约 {estimatedTokens.toLocaleString()} tokens；建议控制在 500,000 以内，为工具读取、思考和写入保留空间。
+      </div>
       <textarea
         className="organize-note"
-        placeholder={'追加说明（可选，自然语言）：如「只整理我刚上传的文件」…'}
+        placeholder={'整理规划或意见（可选）：如「沿用现有章节，只把角色动机拆为设定；矛盾处标为待定」…'}
         value={note}
         onChange={(e) => setNote(e.target.value)}
       />
       <div className="row">
-        <button className="primary" onClick={() => void confirm()} disabled={store.getState().activeRun?.status === 'running'}>
+        <button className="primary" onClick={() => void confirm()} disabled={store.getState().activeRun?.status === 'running' || (selectedMessages.length === 0 && selectedAttachments.length === 0)}>
           确认整理
         </button>
         <button className="tiny-btn" onClick={() => void organizeAll()} title="覆盖选项：重新整理全部对话（危险操作保留确认）">
@@ -933,9 +1079,22 @@ function OrganizeDetailPanel({ onClose }: { onClose: () => void }): React.ReactE
 
 function OrganizeResultCard(): React.ReactElement | null {
   const lastOrganize = useStore((s) => s.lastOrganize);
+  const storedRunSummaries = useStore((s) => s.project?.runSummaries);
+  const runSummaries = storedRunSummaries ?? [];
   const [answerOpen, setAnswerOpen] = React.useState(false);
+  const [reviewRunId, setReviewRunId] = React.useState<string>('');
+  React.useEffect(() => {
+    if (lastOrganize?.runId) setReviewRunId(lastOrganize.runId);
+  }, [lastOrganize?.runId]);
   if (!lastOrganize) return null;
-  const answer = lastOrganize.finalAnswer;
+  const currentSummary = runSummaries.find((r) => r.runId === (reviewRunId || lastOrganize.runId));
+  const rootRunId = currentSummary?.rootRunId ?? currentSummary?.runId ?? lastOrganize.runId;
+  const chain = runSummaries
+    .filter((r) => r.taskKind === 'organize' && (r.rootRunId ?? r.runId) === rootRunId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const selectedRunId = reviewRunId || lastOrganize.runId;
+  const selectedSummary = chain.find((r) => r.runId === selectedRunId);
+  const answer = selectedSummary?.finalAnswer ?? lastOrganize.finalAnswer;
   const preview = answer.length > 2000 ? `${answer.slice(0, 2000)}…` : answer;
   if (lastOrganize.failed) {
     // P1 修复：失败/取消的整理——展示错误 + 部分修改详情 + 回滚入口
@@ -943,12 +1102,12 @@ function OrganizeResultCard(): React.ReactElement | null {
       <div className="organize-result-card organize-result-failed">
         <div className="organize-result-head">
           <span className="badge badge-error">整理未完成</span>
-          <span className="muted small">任务失败/取消前可能已写入部分内容，可查看变更详情并回滚</span>
+          <span className="muted small">{lastOrganize.autoRolledBack ? '返修失败/取消，已自动恢复到返修前版本；尝试过的改动仍可查看' : '任务失败/取消前可能已写入部分内容，可查看变更详情并回滚'}</span>
           <span className="spacer" />
           <button className="tiny-btn" onClick={() => store.dismissOrganize()} title="收起（快照与调用详情仍保留）">收起</button>
         </div>
         {lastOrganize.error && <p className="organize-result-error">{lastOrganize.error}</p>}
-        <OrganizeChangesExpand runId={lastOrganize.runId} />
+        <OrganizeChangesExpand runId={lastOrganize.runId} readOnly={lastOrganize.autoRolledBack} />
       </div>
     );
   }
@@ -957,6 +1116,13 @@ function OrganizeResultCard(): React.ReactElement | null {
       <div className="organize-result-head">
         <span className="badge">整理完成</span>
         <span className="muted small">结果已写入大纲/设定；整理过程未进入讨论上下文</span>
+        {chain.length > 1 && (
+          <select className="model-select" value={selectedRunId} onChange={(e) => setReviewRunId(e.target.value)} title="查看本次整理的返修版本">
+            {chain.map((run, index) => (
+              <option value={run.runId} key={run.runId}>版本 {index + 1}{run.revisionMode ? ` · ${run.revisionMode === 'local' ? '局部返修' : '整体返修'}` : ''}</option>
+            ))}
+          </select>
+        )}
         <span className="spacer" />
         <button className="tiny-btn" onClick={() => store.dismissOrganize()} title="收起（run 记录仍可通过调用详情查看）">收起</button>
       </div>
@@ -970,7 +1136,7 @@ function OrganizeResultCard(): React.ReactElement | null {
           <MarkdownView text={preview} />
         </div>
       )}
-      <OrganizeChangesExpand runId={lastOrganize.runId} />
+      <OrganizeChangesExpand runId={selectedRunId} readOnly={selectedRunId !== chain.at(-1)?.runId} />
     </div>
   );
 }
@@ -1088,7 +1254,7 @@ export function ConversationPane(): React.ReactElement {
           ↓ 跳到底部
         </button>
       )}
-      <InputBar />
+      <InputBar onOrganize={() => setOrganizeOpen(true)} />
     </main>
   );
 }
