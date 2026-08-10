@@ -5,10 +5,10 @@
  * 隐藏中间层级（§3.1）不显示，其子节点提升一层显示。
  */
 import React from 'react';
-import { store, useStore, type TabId } from '../store';
+import { store, useStore, type TabId, type AssetSort, type AssetSortField } from '../store';
 import { confirmDialog, promptDialog } from './ui/dialog';
 import type { NodeSummary } from '../../shared/ipc-types';
-import type { ConversationSession } from '../../shared/types';
+import type { ConversationSession, Asset } from '../../shared/types';
 import { ASSET_TYPE_LABELS, assetTypeLabel } from '../../shared/types';
 
 // --------------------------------------------------------------------------- 大纲树
@@ -154,7 +154,7 @@ function Highlight({ text, query }: { text: string; query: string }): React.Reac
 
 // --------------------------------------------------------------------------- 设定/会话/回收站
 
-function AssetItem({ assetId, title, type }: { assetId: string; title: string; type: string }): React.ReactElement {
+function AssetItem({ assetId, title, type, search }: { assetId: string; title: string; type: string; search?: string }): React.ReactElement {
   const selected = useStore((s) => s.selected?.kind === 'asset' && s.selected.id === assetId);
   return (
     <div
@@ -162,8 +162,124 @@ function AssetItem({ assetId, title, type }: { assetId: string; title: string; t
       onClick={() => store.selectAsset(assetId)}
     >
       <span className="tree-type">{assetTypeLabel(type)}</span>
-      <span className="tree-title">{title || '（未命名）'}</span>
+      <span className="tree-title">
+        {search ? <Highlight text={title} query={search} /> : title || '（未命名）'}
+      </span>
     </div>
+  );
+}
+
+// --------------------------------------------------------------------------- 设定（§5.1：分类归纳 / 组内排序 / 搜索）
+
+function AssetsTab({ autoOpen, onAutoOpenHandled }: { autoOpen: boolean; onAutoOpenHandled: () => void }): React.ReactElement {
+  const project = useStore((s) => s.project);
+  const search = useStore((s) => s.assetSearch);
+  const sort = useStore((s) => s.assetSort);
+  const collapsedTypes = useStore((s) => s.collapsedAssetTypes);
+  const [showNewAsset, setShowNewAsset] = React.useState(autoOpen);
+
+  React.useEffect(() => {
+    if (autoOpen) {
+      setShowNewAsset(true);
+      onAutoOpenHandled();
+    }
+  }, [autoOpen, onAutoOpenHandled]);
+
+  if (!project) return <></>;
+  const assets = project.assets;
+
+  // 搜索：匹配标题 + 类型中文标签（不区分大小写）
+  const match = (a: Asset): boolean => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return a.title.toLowerCase().includes(q) || assetTypeLabel(a.type).toLowerCase().includes(q);
+  };
+
+  // 组内排序（按所选字段 + 方向）
+  const cmp = (a: Asset, b: Asset): number => {
+    let r: number;
+    if (sort.field === 'title') {
+      r = a.title.localeCompare(b.title, 'zh-Hans-CN', { sensitivity: 'base' });
+    } else {
+      r = a[sort.field].localeCompare(b[sort.field]);
+    }
+    return sort.dir === 'asc' ? r : -r;
+  };
+
+  // 分组顺序：预设类型固定顺序在前，自定义类型按字母序在后
+  const presetOrder = Object.keys(ASSET_TYPE_LABELS);
+  const groupTypes = [...new Set(assets.map((a) => a.type))].sort((x, y) => {
+    const xi = presetOrder.indexOf(x);
+    const yi = presetOrder.indexOf(y);
+    if (xi >= 0 && yi >= 0) return xi - yi;
+    if (xi >= 0) return -1;
+    if (yi >= 0) return 1;
+    return x.localeCompare(y);
+  });
+
+  return (
+    <>
+      {assets.length > 0 && (
+        <>
+          <div className="tree-search">
+            <input
+              placeholder="搜索设定…（标题 / 类型）"
+              value={search}
+              onChange={(e) => store.setAssetSearch(e.target.value)}
+            />
+          </div>
+          <div className="asset-sort-row">
+            <select
+              className="asset-sort-field"
+              value={sort.field}
+              onChange={(e) => store.setAssetSort({ ...sort, field: e.target.value as AssetSortField })}
+              title="组内排序字段"
+            >
+              <option value="updatedAt">更新时间</option>
+              <option value="createdAt">创建时间</option>
+              <option value="title">首字母</option>
+            </select>
+            <button
+              className="tiny-btn"
+              onClick={() => store.setAssetSort({ ...sort, dir: sort.dir === 'asc' ? 'desc' : 'asc' })}
+              title={sort.dir === 'asc' ? '组内按所选字段倒序（↓）' : '组内按所选字段正序（↑）'}
+            >
+              {sort.dir === 'asc' ? '↑ 正序' : '↓ 倒序'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {assets.length === 0 && !showNewAsset && (
+        <p className="muted small">还没有设定。讨论中的灵感整理后会自动落到这里。</p>
+      )}
+
+      {groupTypes.map((type) => {
+        const label = assetTypeLabel(type) || '未分类';
+        const items = assets.filter((a) => a.type === type && match(a)).sort(cmp);
+        if (items.length === 0) return null;
+        const collapsed = collapsedTypes.has(type);
+        return (
+          <div key={type} className="asset-group">
+            <div className="asset-group-title" onClick={() => store.toggleAssetGroup(type)}>
+              <span className="tree-toggle">{collapsed ? '▸' : '▾'}</span>
+              <span className="tree-type">{label}</span>
+              <span className="tree-count">{items.length}</span>
+            </div>
+            {!collapsed && items.map((a) => (
+              <AssetItem key={a.id} assetId={a.id} title={a.title} type={a.type} search={search} />
+            ))}
+          </div>
+        );
+      })}
+
+      {assets.length > 0 && groupTypes.every((t) => assets.filter((a) => a.type === t && match(a)).length === 0) && (
+        <p className="muted small">没有匹配的设定。</p>
+      )}
+
+      <button className="subtle" onClick={() => setShowNewAsset(!showNewAsset)}>＋ 新建设定</button>
+      {showNewAsset && <NewAssetForm onClose={() => setShowNewAsset(false)} />}
+    </>
   );
 }
 
@@ -308,7 +424,7 @@ export function LeftPanel({ collapsed }: { collapsed?: boolean }): React.ReactEl
   const tab = useStore((s) => s.tab);
   const project = useStore((s) => s.project);
   const treeSearch = useStore((s) => s.treeSearch);
-  const [showNewAsset, setShowNewAsset] = React.useState(false);
+  const [autoOpenAssetForm, setAutoOpenAssetForm] = React.useState(false);
   const [showNewNode, setShowNewNode] = React.useState(false);
   const [newNodeType, setNewNodeType] = React.useState<'volume' | 'chapter' | 'scene'>('chapter');
   const [newNodeTitle, setNewNodeTitle] = React.useState('');
@@ -323,7 +439,7 @@ export function LeftPanel({ collapsed }: { collapsed?: boolean }): React.ReactEl
 
   const switchTab = (t: TabId): void => {
     store.setTab(t);
-    if (t === 'assets' && !hasAssets) setShowNewAsset(true);
+    if (t === 'assets' && !hasAssets) setAutoOpenAssetForm(true);
   };
 
   const createNode = async (): Promise<void> => {
@@ -387,14 +503,7 @@ export function LeftPanel({ collapsed }: { collapsed?: boolean }): React.ReactEl
         )}
 
         {tab === 'assets' && (
-          <>
-            {assets.length === 0 && !showNewAsset && (
-              <p className="muted small">还没有设定。讨论中的灵感整理后会自动落到这里。</p>
-            )}
-            {assets.map((a) => <AssetItem key={a.id} assetId={a.id} title={a.title} type={a.type} />)}
-            <button className="subtle" onClick={() => setShowNewAsset(!showNewAsset)}>＋ 新建设定</button>
-            {showNewAsset && <NewAssetForm onClose={() => setShowNewAsset(false)} />}
-          </>
+          <AssetsTab autoOpen={autoOpenAssetForm} onAutoOpenHandled={() => setAutoOpenAssetForm(false)} />
         )}
 
         {tab === 'sessions' && (

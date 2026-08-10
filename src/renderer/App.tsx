@@ -140,6 +140,7 @@ function TopBar(): React.ReactElement {
   const module = useStore((s) => s.module);
   const leftCollapsed = useStore((s) => s.leftCollapsed);
   const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const chatCollapsed = useStore((s) => s.chatCollapsed);
   const scenesCollapsed = useStore((s) => s.scenesCollapsed);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [menuOpen, setMenuOpen] = React.useState(false);
@@ -274,6 +275,13 @@ function TopBar(): React.ReactElement {
           >
             右栏
           </button>
+          <button
+            className={`tiny-btn topbar-toggle${chatCollapsed ? ' active' : ''}`}
+            onClick={() => store.toggleChatPanel()}
+            title={chatCollapsed ? '展开中间聊天（对话）' : '折叠中间聊天（只看左右两栏）'}
+          >
+            对话
+          </button>
         </>
       )}
       {module === 'writing' && (
@@ -306,6 +314,7 @@ function App(): React.ReactElement {
   const module = useStore((s) => s.module);
   const leftCollapsed = useStore((s) => s.leftCollapsed);
   const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const chatCollapsed = useStore((s) => s.chatCollapsed);
   const scenesCollapsed = useStore((s) => s.scenesCollapsed);
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [cols, setCols] = React.useState({ left: 250, right: 340 });
@@ -402,11 +411,11 @@ function App(): React.ReactElement {
               >
                 <div
                   className="layout"
-                  style={{ '--col-left': `${leftCollapsed ? 0 : cols.left}px`, '--col-right': `${rightCollapsed ? 0 : cols.right}px` } as React.CSSProperties}
+                  style={{ '--col-left': `${leftCollapsed ? 0 : cols.left}px`, '--col-mid': chatCollapsed ? '0fr' : '1fr', '--col-right': `${rightCollapsed ? 0 : cols.right}px` } as React.CSSProperties}
                 >
                   {!leftCollapsed && <div className="splitter" style={{ left: `calc(${cols.left}px - 3px)` }} onMouseDown={(e) => startDrag('left', e)} />}
                   <LeftPanel collapsed={leftCollapsed} />
-                  <ConversationPane />
+                  <ConversationPane collapsed={chatCollapsed} />
                   <Workspace collapsed={rightCollapsed} />
                   {!rightCollapsed && (
                     <div

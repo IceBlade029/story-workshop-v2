@@ -1143,7 +1143,7 @@ function OrganizeResultCard(): React.ReactElement | null {
 
 // --------------------------------------------------------------------------- 面板
 
-export function ConversationPane(): React.ReactElement {
+export function ConversationPane({ collapsed }: { collapsed?: boolean }): React.ReactElement {
   const path = useStore((s) => s.activePath);
   const project = useStore((s) => s.project);
   const activeRun = useStore((s) => s.activeRun);
@@ -1203,7 +1203,7 @@ export function ConversationPane(): React.ReactElement {
 
   return (
     <main
-      className={`conversation${dragOver ? ' drag-over' : ''}`}
+      className={`conversation${collapsed ? ' collapsed' : ''}${dragOver ? ' drag-over' : ''}`}
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}

@@ -543,18 +543,46 @@ describe('store — 折叠与专注模式（§6.12）', () => {
     expect(store.getState().scenesCollapsed).toBe(false);
   });
 
+  it('中间聊天独立折叠（不影响左右栏与专注模式）', () => {
+    store.reset();
+    store.toggleChatPanel();
+    expect(store.getState().chatCollapsed).toBe(true);
+    expect(store.getState().leftCollapsed).toBe(false);
+    expect(store.getState().rightCollapsed).toBe(false);
+    store.toggleChatPanel();
+    expect(store.getState().chatCollapsed).toBe(false);
+    // 专注模式不动聊天折叠
+    store.toggleChatPanel();
+    store.toggleFocus();
+    expect(store.getState().chatCollapsed).toBe(true);
+  });
+
+  it('设定 tab：搜索词 / 组内排序 / 分组折叠', () => {
+    store.reset();
+    store.setAssetSearch('雨城');
+    expect(store.getState().assetSearch).toBe('雨城');
+    store.setAssetSort({ field: 'title', dir: 'asc' });
+    expect(store.getState().assetSort).toEqual({ field: 'title', dir: 'asc' });
+    store.toggleAssetGroup('character');
+    expect(store.getState().collapsedAssetTypes.has('character')).toBe(true);
+    store.toggleAssetGroup('character');
+    expect(store.getState().collapsedAssetTypes.has('character')).toBe(false);
+  });
+
   it('折叠状态持久化到 localStorage 并可恢复', () => {
     store.reset();
     store.toggleLeftPanel();
     store.toggleScenes();
+    store.toggleChatPanel();
     const saved = JSON.parse(localStorage.getItem('sw2:collapsed') ?? '{}') as Record<string, boolean>;
-    expect(saved).toEqual({ left: true, right: false, scenes: true });
+    expect(saved).toEqual({ left: true, right: false, scenes: true, chat: true });
     // 模拟重启：新 store 实例通过 initCollapsed 恢复
     store.reset();
     expect(store.getState().leftCollapsed).toBe(false);
     store.initCollapsed();
     expect(store.getState().leftCollapsed).toBe(true);
     expect(store.getState().scenesCollapsed).toBe(true);
+    expect(store.getState().chatCollapsed).toBe(true);
   });
 });
 

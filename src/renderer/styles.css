@@ -437,7 +437,7 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
 .layout {
   flex: 1;
   display: grid;
-  grid-template-columns: var(--col-left, 250px) 1fr var(--col-right, 340px);
+  grid-template-columns: var(--col-left, 250px) var(--col-mid, 1fr) var(--col-right, 340px);
   min-height: 0;
   position: relative;
 }
@@ -448,6 +448,8 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
 /* §6.12 一键折叠 */
 .left-panel.collapsed { display: none; }
 .workspace.collapsed { display: none; }
+/* §6.12 中间聊天折叠：grid-column 显式定位，隐藏后左右栏不被重排 */
+.conversation.collapsed { display: none; }
 .writing-module.scenes-collapsed { grid-template-columns: 1fr; }
 .writing-module.scenes-collapsed .writing-scenes { display: none; }
 .topbar-toggle.active { background: var(--accent); color: var(--accent-contrast); }
@@ -616,6 +618,23 @@ textarea:focus-visible, input:focus-visible, select:focus-visible { outline: non
 .tree-title { overflow: hidden; text-overflow: ellipsis; }
 .tree-title mark { background: var(--marker-bg); color: var(--marker-color); border-radius: 2px; padding: 0 1px; }
 .tree-count { font-size: 11px; color: var(--text-weak); margin-left: auto; flex-shrink: 0; }
+
+/* ============================================================ 设定（§5.1 分类归纳 / 组内排序 / 搜索） */
+.asset-sort-row { display: flex; align-items: center; gap: 6px; margin: 2px 8px 6px; }
+.asset-sort-field {
+  flex: 1; min-width: 0; padding: 4px 6px; font-size: 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-m);
+  background: var(--bg-panel); color: var(--text);
+}
+.asset-sort-row .tiny-btn { font-size: 12px; flex-shrink: 0; }
+.asset-group { margin-top: 2px; }
+.asset-group-title {
+  display: flex; align-items: center; gap: 6px; padding: 5px 6px 3px;
+  cursor: pointer; user-select: none; border-radius: var(--radius-m);
+}
+.asset-group-title:hover { background: var(--bg-hover); }
+.asset-group-title .tree-type { background: var(--bg-accent); color: var(--accent); }
+.asset-group-title .tree-count { font-size: 11px; color: var(--text-weak); margin-left: auto; }
 
 /* ============================================================ 徽标 */
 .badge {

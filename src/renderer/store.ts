@@ -37,6 +37,20 @@ export function nextPendingKey(): string {
 /** 长文本自动识别为附件的阈值（≈2000 字，§3.2）。 */
 export const LONG_TEXT_THRESHOLD = 2000;
 
+/** 设定组内排序字段（§5.1 设定分类归纳）。 */
+export type AssetSortField = 'updatedAt' | 'createdAt' | 'title';
+export type AssetSortDir = 'asc' | 'desc';
+export interface AssetSort {
+  field: AssetSortField;
+  dir: AssetSortDir;
+}
+
+export const ASSET_SORT_FIELD_LABELS: Record<AssetSortField, string> = {
+  updatedAt: '更新时间',
+  createdAt: '创建时间',
+  title: '首字母',
+};
+
 /** 运行完成兜底（毫秒）：流式事件推送异常时主动刷新状态，绝不永远「思考中…」 */
 const RUN_COMPLETION_FALLBACK_MS = 60_000;
 export type RunKind = 'chat' | 'organize' | 'detail_fill' | 'revise';
@@ -108,10 +122,18 @@ export interface AppState {
   expandedIds: Set<string>;
   /** 大纲树搜索词 */
   treeSearch: string;
+  /** 设定 tab 搜索词（匹配标题 + 类型，§5.1） */
+  assetSearch: string;
+  /** 设定组内排序（按类型分组后组内生效，§5.1） */
+  assetSort: AssetSort;
+  /** 设定分组折叠状态（按类型名，切 tab 不丢） */
+  collapsedAssetTypes: Set<string>;
   /** 讨论模块左栏折叠（§6.12：一键折叠腾出对话空间） */
   leftCollapsed: boolean;
   /** 讨论模块右栏折叠 */
   rightCollapsed: boolean;
+  /** 讨论模块中间聊天折叠（只留左右栏对照浏览，§6.12） */
+  chatCollapsed: boolean;
   /** 写作模块场景树折叠 */
   scenesCollapsed: boolean;
   /** 回答详略档位（聊天工具栏每次发送可选；localStorage 记忆上次选择） */
@@ -144,8 +166,12 @@ const initial: AppState = {
   toast: null,
   expandedIds: new Set(),
   treeSearch: '',
+  assetSearch: '',
+  assetSort: { field: 'updatedAt', dir: 'desc' },
+  collapsedAssetTypes: new Set(),
   leftCollapsed: false,
   rightCollapsed: false,
+  chatCollapsed: false,
   scenesCollapsed: false,
   answerDetail: 'auto',
   activePath: [],
@@ -176,16 +202,17 @@ function persistAnswerDetail(detail: AnswerDetail): void {
   }
 }
 
-function loadCollapsed(): { leftCollapsed: boolean; rightCollapsed: boolean; scenesCollapsed: boolean } {
+function loadCollapsed(): { leftCollapsed: boolean; rightCollapsed: boolean; scenesCollapsed: boolean; chatCollapsed: boolean } {
   try {
-    const raw = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '{}') as Partial<Record<'left' | 'right' | 'scenes', boolean>>;
+    const raw = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '{}') as Partial<Record<'left' | 'right' | 'scenes' | 'chat', boolean>>;
     return {
       leftCollapsed: raw.left === true,
       rightCollapsed: raw.right === true,
       scenesCollapsed: raw.scenes === true,
+      chatCollapsed: raw.chat === true,
     };
   } catch {
-    return { leftCollapsed: false, rightCollapsed: false, scenesCollapsed: false };
+    return { leftCollapsed: false, rightCollapsed: false, scenesCollapsed: false, chatCollapsed: false };
   }
 }
 
@@ -193,7 +220,7 @@ function persistCollapsed(s: AppState): void {
   try {
     localStorage.setItem(
       COLLAPSED_KEY,
-      JSON.stringify({ left: s.leftCollapsed, right: s.rightCollapsed, scenes: s.scenesCollapsed }),
+      JSON.stringify({ left: s.leftCollapsed, right: s.rightCollapsed, scenes: s.scenesCollapsed, chat: s.chatCollapsed }),
     );
   } catch {
     /* localStorage 不可用时忽略 */
@@ -485,6 +512,11 @@ export const store = {
     withState((s) => ({ ...s, rightCollapsed: !s.rightCollapsed }));
   },
 
+  /** 讨论模块中间聊天折叠切换（只留左右栏对照浏览，§6.12）。 */
+  toggleChatPanel(): void {
+    withState((s) => ({ ...s, chatCollapsed: !s.chatCollapsed }));
+  },
+
   /** 写作模块场景树折叠切换。 */
   toggleScenes(): void {
     withState((s) => ({ ...s, scenesCollapsed: !s.scenesCollapsed }));
@@ -541,6 +573,26 @@ export const store = {
 
   setTreeSearch(query: string): void {
     setState({ treeSearch: query });
+  },
+
+  /** 设定 tab 搜索词（匹配标题 + 类型，§5.1）。 */
+  setAssetSearch(query: string): void {
+    setState({ assetSearch: query });
+  },
+
+  /** 设定组内排序（按类型分组后组内生效，§5.1）。 */
+  setAssetSort(sort: AssetSort): void {
+    setState({ assetSort: sort });
+  },
+
+  /** 设定分组折叠切换（按类型名，§5.1）。 */
+  toggleAssetGroup(type: string): void {
+    withState((s) => {
+      const next = new Set(s.collapsedAssetTypes);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return { ...s, collapsedAssetTypes: next };
+    });
   },
 
   /** 选择大纲节点/设定（ux-review §4.6：左栏选择直接替换，不压历史栈）。 */

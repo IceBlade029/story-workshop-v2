@@ -1113,4 +1113,107 @@ describe('会话（ux-review §4.5，ChatGPT 式）— 状态化 mock 走查', (
     });
     expect(writingModule()?.className).not.toContain('scenes-collapsed');
   });
+
+  it('一键折叠（§6.12）：「对话」按钮折叠中间聊天，左右两栏仍在', async () => {
+    await openProject();
+    const conversation = (): HTMLElement | null => document.querySelector('.conversation');
+
+    expect(conversation()?.className).not.toContain('collapsed');
+    expect(screen.getByTestId('chat-input')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('折叠中间聊天（只看左右两栏）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(conversation()?.className).toContain('collapsed');
+    // 折叠仅隐藏（display:none），DOM 仍在；聊天输入挂载在 conversation 内部
+    expect(screen.getByTestId('chat-input').closest('.conversation')?.className).toContain('collapsed');
+    expect(document.querySelector('.left-panel')).toBeTruthy(); // 左右栏不受影响
+    expect(document.querySelector('.workspace')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('展开中间聊天（对话）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(conversation()?.className).not.toContain('collapsed');
+    expect(screen.getByTestId('chat-input')).toBeTruthy();
+  });
+
+  it('设定 tab（§5.1）：分类分组 / 组内排序 / 搜索过滤 / 分组折叠', async () => {
+    const api = makeStatefulApi();
+    const projectWithAssets: ProjectState = {
+      ...makeProjectState(),
+      assets: [
+        { id: 'a1', type: 'character', title: '阿凯', content: '', hash: 'h1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-03T00:00:00Z' },
+        { id: 'a2', type: 'character', title: '阿贝', content: '', hash: 'h2', createdAt: '2026-01-02T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z' },
+        { id: 'a3', type: 'location', title: '雨城', content: '', hash: 'h3', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-04T00:00:00Z' },
+        { id: 'a4', type: '阵营', title: '北境联盟', content: '', hash: 'h4', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+      ],
+    };
+    api.project.create = vi.fn(async () => projectWithAssets);
+    api.state.get = vi.fn(async () => projectWithAssets);
+    setApiForTest(api);
+    store.reset();
+    await renderApp();
+    fireEvent.change(screen.getByPlaceholderText('项目名称'), { target: { value: '我的故事' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('project-create'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 进入设定 tab
+    await act(async () => {
+      fireEvent.click(screen.getByText('设定 (4)'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 分组：预设类型顺序在前（角色 > 地点），自定义类型在后
+    const groupTitles = Array.from(document.querySelectorAll('.asset-group-title')).map((el) => (el as HTMLElement).textContent ?? '');
+    expect(groupTitles).toEqual(['▾角色2', '▾地点1', '▾阵营1']);
+
+    // 组内排序默认：更新时间倒序 → 角色组内 阿凯（1/3 更新）在 阿贝 前
+    const charRows = Array.from(document.querySelectorAll('.asset-group')).filter((g) => (g.textContent ?? '').includes('角色'))[0];
+    const titles = Array.from(charRows.querySelectorAll('.tree-title')).map((el) => (el as HTMLElement).textContent ?? '');
+    expect(titles).toEqual(['阿凯', '阿贝']);
+
+    // 切首字母正序（zh-Hans-CN 拼音：贝 bèi < 凯 kǎi）→ 阿贝 在 阿凯 前
+    await act(async () => {
+      fireEvent.change(screen.getByTitle('组内排序字段'), { target: { value: 'title' } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('组内按所选字段正序（↑）'));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const charRows2 = Array.from(document.querySelectorAll('.asset-group')).filter((g) => (g.textContent ?? '').includes('角色'))[0];
+    expect(Array.from(charRows2.querySelectorAll('.tree-title')).map((el) => (el as HTMLElement).textContent ?? '')).toEqual(['阿贝', '阿凯']);
+
+    // 搜索：只匹配标题/类型，空组隐藏
+    fireEvent.change(screen.getByPlaceholderText('搜索设定…（标题 / 类型）'), { target: { value: '雨城' } });
+    await act(async () => {});
+    expect(screen.queryByText('角色')).toBeNull();
+    expect(screen.getByText('雨城')).toBeTruthy();
+
+    // 搜索命中高亮
+    expect(document.querySelector('.tree-title mark')?.textContent).toBe('雨城');
+
+    // 清空搜索 → 分组折叠/展开
+    fireEvent.change(screen.getByPlaceholderText('搜索设定…（标题 / 类型）'), { target: { value: '' } });
+    await act(async () => {});
+    const groupTitle = (): HTMLElement => {
+      const el = Array.from(document.querySelectorAll('.asset-group-title')).find((g) => (g.textContent ?? '').includes('角色'));
+      if (!el) throw new Error('角色分组标题不存在');
+      return el as HTMLElement;
+    };
+    await act(async () => {
+      fireEvent.click(groupTitle());
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.queryByText('阿凯')).toBeNull();
+    await act(async () => {
+      fireEvent.click(groupTitle());
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(screen.getByText('阿凯')).toBeTruthy();
+  });
 });
